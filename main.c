@@ -1,4 +1,4 @@
-// { - basic programming language. This program is basic translator, 
+// Alzur - basic programming language. This program is basic translator, 
 // which can do interpretation and compilation. 
 
 #include <stdlib.h>
