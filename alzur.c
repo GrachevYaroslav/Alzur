@@ -23,13 +23,6 @@ typedef struct Token
   char* token_value;
 } Token;
 
-// Data type that will contain tokens in one place
-typedef struct Node
-{
-  Token token;
-  struct Node* node;
-} Node;
-
 // Vector implementation with dynamic array
 typedef struct Vector
 {
@@ -45,6 +38,7 @@ char character;
 // Global token
 Token token;
 
+// Initialize vector object
 Vector* VectorInit()
 {
   Vector* vec = (Vector*)malloc(sizeof(Vector));
@@ -66,6 +60,7 @@ Vector* VectorInit()
   return vec;
 }
 
+// Add token to vector
 void VectorAdd(Token token, Vector* vector)
 {
   if(vector->capacity == vector->used)
@@ -120,16 +115,17 @@ uint64_t VectorSize(Vector* vector)
   return vector->used;
 }
 
+// Print value of vector
 void VectorPrint(Vector* vector)
 {
   if(vector->used == 0)
-    printf("[VEC_DEBUG]. vector is empty\n");
+    printf("[VEC_DEBUG]: vector is empty\n");
   else
   {
-    printf("[VEC_DEBUG]. %d elements in vector\n", vector->used);
+    printf("[VEC_DEBUG]: %d elements in vector\n", vector->used);
     for(size_t i = 0; i <  vector->used; i++)
     {
-      printf("[VEC_DEBUG]. value of %d token: type - %d, value: %s\n", (i+1), 
+      printf("[VEC_DEBUG]: value of %d token: type - ( %d ), value - ( %s )\n", (i+1), 
       vector->token_buff[i].token_type, 
       vector->token_buff[i].token_value
       );
@@ -189,6 +185,7 @@ static void ScanSourceFile(const char* filename)
   }
 }
 
+// Add character in token object
 void AddCharToToken(Token* token, char ch)
 {
   if(token->token_value == NULL)
@@ -225,17 +222,38 @@ void NextCharacter()
   gBuffer++;
 }
 
-// TODO: Debug NextToken()
-void NextToken(Vector* vector)
+// Tokenizer, function that break sentence into tokens
+// and put them in vector of tokens
+void Tokenizer(Vector* vector)
 {
 again:
   switch (character)
   {
     case 0:
+      if(token.token_value != NULL)
+        VectorAdd(token, vector);
       break;
     case ' ':
+      printf("%c\n", character);
+      if(token.token_value != NULL)
+      {
+        VectorAdd(token, vector);
+        free(token.token_value);
+        token.token_value = NULL;
+
+        NextCharacter();
+        goto again;
+        break;
+      }
+      else
+      {
+        NextCharacter();
+        goto again;
+        break;
+      }
     case '\n':
     case '\t':
+      printf("%c\n", character);
       NextCharacter();
       goto again;
       break;
@@ -249,6 +267,7 @@ again:
     case '7':
     case '8':
     case '9':
+      printf("%c\n", character);
       token.token_type = DIGIT;
       AddCharToToken(&token, character);
       NextCharacter();
@@ -258,6 +277,7 @@ again:
     case '-':
     case '*':
     case '/':
+      printf("%c\n", character);
       if(token.token_value != NULL)
       {
         VectorAdd(token, vector);
@@ -265,14 +285,20 @@ again:
         token.token_value = NULL;
         token.token_type = OPERATOR;
         AddCharToToken(&token, character);
+
         NextCharacter();
       }
       else
       {
         token.token_type = OPERATOR;
         AddCharToToken(&token, character);
+        VectorAdd(token, vector);
+        free(token.token_value);
+        token.token_value = NULL;
+
         NextCharacter();
       }
+      goto again;
       break;
     default:
       NextCharacter();
@@ -320,28 +346,6 @@ int main(int argc, char **argv)
       printf("filename: %s\n", argv[1]);
 
       printf("Compilation...\n");
-      
-      // Test Vector
-      printf("...\n");
-
-      Token tok;
-      tok.token_type = 0;
-      tok.token_value = NULL;
-      AddCharToToken(&tok, 'a');
-
-      Vector* vec = VectorInit();
-
-      VectorAdd(tok, vec);
-      AddCharToToken(&tok, 'a');
-      VectorAdd(tok, vec);
-      AddCharToToken(&tok, 'a');
-      VectorAdd(tok, vec);
-      AddCharToToken(&tok, 'a');
-      VectorAdd(tok, vec);
-
-      VectorPrint(vec);
-      printf("...\n");
-      // ...
 
       Vector* vector = VectorInit();
       printf("Vector size: %d\n", VectorSize(vector));
@@ -351,11 +355,10 @@ int main(int argc, char **argv)
       token.token_value = NULL;
 
       NextCharacter();
-      NextToken(vector);
+      Tokenizer(vector);
       VectorPrint(vector);
 
       free(token.token_value);
-      VectorFree(vec);
       VectorFree(vector);
     } 
     else 
