@@ -13,7 +13,8 @@
 typedef enum TokenType
 {
   DIGIT = 0,
-  OPERATOR = 1
+  OPERATOR = 1,
+  EMPTY = 255
 } TokenType;
 
 // Token data type
@@ -234,11 +235,11 @@ again:
         VectorAdd(token, vector);
       break;
     case ' ':
-      printf("%c\n", character);
       if(token.token_value != NULL)
       {
         VectorAdd(token, vector);
         free(token.token_value);
+        token.token_type = EMPTY;
         token.token_value = NULL;
 
         NextCharacter();
@@ -251,9 +252,24 @@ again:
         goto again;
         break;
       }
-    case '\n':
+    case '\n': // TODO: Fix white space after new line bug
+      if(token.token_value != NULL)
+      {
+        VectorAdd(token, vector);
+        free(token.token_value);
+        token.token_type = EMPTY;
+        token.token_value = NULL;
+
+        NextCharacter();
+        goto again;
+      }
+      else
+      {
+        NextCharacter();
+        goto again;
+      }
+      break;
     case '\t':
-      printf("%c\n", character);
       NextCharacter();
       goto again;
       break;
@@ -267,17 +283,37 @@ again:
     case '7':
     case '8':
     case '9':
-      printf("%c\n", character);
+      if(token.token_type == DIGIT || token.token_type == EMPTY)
+      {
+        token.token_type = DIGIT;
+        AddCharToToken(&token, character);
+        NextCharacter();
+        goto again;
+      }
+      else
+      {
+        VectorAdd(token, vector);
+        free(token.token_value);
+        token.token_type = 255;
+        token.token_value = NULL;
+
+        AddCharToToken(&token, character);
+        token.token_type = DIGIT;
+        NextCharacter();
+        goto again;
+      }
+      /*
       token.token_type = DIGIT;
       AddCharToToken(&token, character);
       NextCharacter();
       goto again;
       break;
+      */
     case '+':
     case '-':
     case '*':
     case '/':
-      printf("%c\n", character);
+    // TODO: Fix operator handling
       if(token.token_value != NULL)
       {
         VectorAdd(token, vector);
@@ -294,6 +330,7 @@ again:
         AddCharToToken(&token, character);
         VectorAdd(token, vector);
         free(token.token_value);
+        token.token_type = 255;
         token.token_value = NULL;
 
         NextCharacter();
@@ -348,7 +385,6 @@ int main(int argc, char **argv)
       printf("Compilation...\n");
 
       Vector* vector = VectorInit();
-      printf("Vector size: %d\n", VectorSize(vector));
 
       ScanSourceFile(argv[1]);
 
@@ -356,6 +392,7 @@ int main(int argc, char **argv)
 
       NextCharacter();
       Tokenizer(vector);
+      printf("%d\n", VectorSize(vector));
       VectorPrint(vector);
 
       free(token.token_value);
