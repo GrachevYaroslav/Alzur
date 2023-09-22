@@ -32,12 +32,37 @@ typedef struct Vector
   size_t used;     // How many slots in array is already used
 } Vector;
 
+typedef struct AST
+{
+  Token item;
+  struct AST* left;
+  struct AST* right;
+}AST;
+
 // Global buffer, that contain text from source file
 char* gBuffer;
 // Global character
 char character;
 // Global token
 Token token;
+
+// ...
+
+AST* ASTInit()
+{
+  AST* root = (AST*)malloc(sizeof(AST));
+  if(root == NULL)
+  {
+    fprintf(stderr, "error: bad allocation in root: %p\n", (void*)root);
+    exit(MEMORY_ALLOCATION_FAILURE);
+  }
+
+  root->item.token_type  = EMPTY;
+  root->item.token_value = NULL;
+
+  root->left  = NULL;
+  root->right = NULL;
+}
 
 // Initialize vector object
 Vector* VectorInit()
@@ -344,15 +369,21 @@ again:
   }
 }
 
-void Parse(char* source_text_buffer, Vector* vector)
+void Parse(Vector* vector)
 {
-  
+  uint32_t SizeOfVector = 0;
+  while(SizeOfVector < vector->used)
+  {
+    Token tok = vector->token_buff[SizeOfVector];
+    if(tok.token_type == DIGIT)
+    {
+      // TODO: add insert() in tree
+    }
+  }
 }
 
 int main(int argc, char **argv)
 {
-  char* buff = NULL;
-
   if(argc == 1)
   {
     printf("Type 1 filename to interpret\n");
