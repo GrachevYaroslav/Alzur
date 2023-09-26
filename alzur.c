@@ -9,27 +9,31 @@
 #define MEMORY_ALLOCATION_FAILURE   2
 #define MEMORY_REALLOCATION_FAILURE 3
 
-// Enums for different token kinds
+#define global_variable static
+#define internal        static
+
 typedef enum TokenType
 {
   DIGIT = 0,
   OPERATOR = 1,
+  ADD = 2,
+  SUBTRACT = 3,
+  MULTIPLY = 4,
+  DIVIDE = 5,
   EMPTY = 255
 } TokenType;
 
-// Token data type
 typedef struct Token
 {
   TokenType token_type;
   char* token_value;
 } Token;
 
-// Vector implementation with dynamic array
 typedef struct Vector
 {
   Token* token_buff; // Array that contain all tokens
-  size_t capacity; // Actual size of array
-  size_t used;     // How many slots in array is already used
+  size_t capacity;
+  size_t used;
 } Vector;
 
 typedef struct AST
@@ -39,12 +43,9 @@ typedef struct AST
   struct AST* right;
 }AST;
 
-// Global buffer, that contain text from source file
-char* gBuffer;
-// Global character
-char character;
-// Global token
-Token token;
+global_variable char* gBuffer;  // Global buffer, that contain text from source file
+global_variable char character; // Global character
+global_variable Token token;    // Global character
 
 // ...
 
@@ -62,6 +63,8 @@ AST* ASTInit()
 
   root->left  = NULL;
   root->right = NULL;
+
+  return root;
 }
 
 // Initialize vector object
@@ -165,8 +168,35 @@ void VectorFree(Vector* vector)
   free(vector);
 }
 
+uint64_t ChrToInt(const char* str)
+{
+  size_t index = 0;
+  size_t strSize = strlen(str);
+
+  uint64_t result = 0;
+
+  if(strSize == 1)
+  {
+    result = str[index] - '0';
+    return result;
+  }
+
+  while(index < strSize)
+  {
+    result += str[index] - '0';
+
+    if((index+1) == strSize)
+      break;
+
+    result *= 10;
+    index++;
+  }
+
+  return result;
+}
+
 // Function that get source code from file to global buffer
-static void ScanSourceFile(const char* filename)
+internal void ScanSourceFile(const char* filename)
 {
   FILE *src = fopen(filename, "r");
 
@@ -212,7 +242,7 @@ static void ScanSourceFile(const char* filename)
 }
 
 // Add character in token object
-void AddCharToToken(Token* token, char ch)
+internal void AddCharToToken(Token* token, char ch)
 {
   if(token->token_value == NULL)
   {
@@ -242,15 +272,46 @@ void AddCharToToken(Token* token, char ch)
   }
 }
 
-void NextCharacter()
+internal void NextCharacter()
 {
   character = *gBuffer;
   gBuffer++;
 }
 
+internal void FecthAndPushToVec(Vector* vector, TokenType tok_type)
+{
+  VectorAdd(token, vector);
+  free(token.token_value);
+  token.token_value = NULL;
+  token.token_type = tok_type;
+}
+
+internal void IfTokenNotEmpty(Vector* vector, TokenType tok_type)
+{
+  if(token.token_value != NULL)
+  {
+    VectorAdd(token, vector);
+    free(token.token_value);
+    token.token_value = NULL;
+    token.token_type = tok_type;
+    AddCharToToken(&token, character);
+    NextCharacter();
+  }
+  else
+  {
+    token.token_type = OPERATOR;
+    AddCharToToken(&token, character);
+    VectorAdd(token, vector);
+    free(token.token_value);
+    token.token_value = NULL;
+    token.token_type = EMPTY;
+    NextCharacter();
+  }
+}
+
 // Tokenizer, function that break sentence into tokens
 // and put them in vector of tokens
-void Tokenizer(Vector* vector)
+internal void Tokenizer(Vector* vector)
 {
 again:
   switch (character)
@@ -262,11 +323,7 @@ again:
     case ' ':
       if(token.token_value != NULL)
       {
-        VectorAdd(token, vector);
-        free(token.token_value);
-        token.token_type = EMPTY;
-        token.token_value = NULL;
-
+        FecthAndPushToVec(vector, EMPTY);
         NextCharacter();
         goto again;
         break;
@@ -280,11 +337,7 @@ again:
     case '\n': // TODO: Fix white space after new line bug
       if(token.token_value != NULL)
       {
-        VectorAdd(token, vector);
-        free(token.token_value);
-        token.token_type = EMPTY;
-        token.token_value = NULL;
-
+        FecthAndPushToVec(vector, EMPTY);
         NextCharacter();
         goto again;
       }
@@ -317,11 +370,7 @@ again:
       }
       else
       {
-        VectorAdd(token, vector);
-        free(token.token_value);
-        token.token_type = 255;
-        token.token_value = NULL;
-
+        FecthAndPushToVec(vector, EMPTY);
         AddCharToToken(&token, character);
         token.token_type = DIGIT;
         NextCharacter();
@@ -334,32 +383,20 @@ again:
       goto again;
       break;
       */
-    case '+':
+    case '+': // TODO: Fix operator handling
+      IfTokenNotEmpty(vector, ADD);
+      goto again;
+      break;
     case '-':
+      IfTokenNotEmpty(vector, SUBTRACT);
+      goto again;
+      break;
     case '*':
+      IfTokenNotEmpty(vector, MULTIPLY);
+      goto again;
+      break;
     case '/':
-    // TODO: Fix operator handling
-      if(token.token_value != NULL)
-      {
-        VectorAdd(token, vector);
-        free(token.token_value);
-        token.token_value = NULL;
-        token.token_type = OPERATOR;
-        AddCharToToken(&token, character);
-
-        NextCharacter();
-      }
-      else
-      {
-        token.token_type = OPERATOR;
-        AddCharToToken(&token, character);
-        VectorAdd(token, vector);
-        free(token.token_value);
-        token.token_type = 255;
-        token.token_value = NULL;
-
-        NextCharacter();
-      }
+      IfTokenNotEmpty(vector, DIVIDE);
       goto again;
       break;
     default:
@@ -369,16 +406,88 @@ again:
   }
 }
 
-void Parse(Vector* vector)
+internal void Parse(Vector* vector)
 {
-  uint32_t SizeOfVector = 0;
+  size_t SizeOfVector =    0;
+  uint64_t left_operand =  0;
+  uint64_t right_operand = 0;
+
+  TokenType operator_type;
+
   while(SizeOfVector < vector->used)
   {
+
+    // S: OPERAND&OPERATOR&OPERAND
+    // OPERAND: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
+    // OPERATOR: + | - | * | /
+
     Token tok = vector->token_buff[SizeOfVector];
     if(tok.token_type == DIGIT)
     {
       // TODO: add insert() in tree
+      left_operand = ChrToInt(vector->token_buff[SizeOfVector].token_value);
+      SizeOfVector++;
+      tok = vector->token_buff[SizeOfVector];
+      if(tok.token_type == ADD ||
+         tok.token_type == SUBTRACT ||
+         tok.token_type == MULTIPLY ||
+         tok.token_type == DIVIDE)
+      {
+        if(tok.token_type == ADD)
+          operator_type = ADD;
+        else if(tok.token_type == SUBTRACT)
+          operator_type = SUBTRACT;
+        else if(tok.token_type == MULTIPLY)
+          operator_type = MULTIPLY;
+        else
+          operator_type = DIVIDE;
+
+        SizeOfVector++;
+        tok = vector->token_buff[SizeOfVector];
+        if(tok.token_type == DIGIT)
+        {
+          if(operator_type == ADD)
+          {
+            right_operand = ChrToInt(vector->token_buff[SizeOfVector].token_value);
+            printf("result: %d\n", left_operand+right_operand);
+          }  
+          else if(operator_type == SUBTRACT)
+          {
+            right_operand = ChrToInt(vector->token_buff[SizeOfVector].token_value);
+            printf("result: %d\n", left_operand-right_operand);
+          }
+          else if(operator_type == MULTIPLY)
+          {
+            right_operand = ChrToInt(vector->token_buff[SizeOfVector].token_value);
+            printf("result: %d\n", left_operand*right_operand);
+          }
+          else
+          {
+            right_operand = ChrToInt(vector->token_buff[SizeOfVector].token_value);
+            printf("result: %d\n", left_operand/right_operand);
+          }
+          
+          break;
+        }
+        else
+        {
+          fprintf(stderr, "syntax error\n");
+          break;
+        }
+      }
+      else
+      {
+        fprintf(stderr, "syntax error\n");
+        break;
+      }
     }
+    else
+    {
+      fprintf(stderr, "syntax error\n");
+      break;
+    }
+
+    SizeOfVector++;
   }
 }
 
@@ -426,6 +535,9 @@ int main(int argc, char **argv)
       printf("%d\n", VectorSize(vector));
       VectorPrint(vector);
 
+      Parse(vector);
+
+      free(gBuffer);
       free(token.token_value);
       VectorFree(vector);
     } 
@@ -440,6 +552,5 @@ int main(int argc, char **argv)
     printf("Too many filenames, need one\n");
   }
 
-  //getchar(); to pause the program.
   return 0;
 }
