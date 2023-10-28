@@ -1,13 +1,19 @@
+// I just want to write my first compiler.
 // Alzur - basic programming language. This program is basic translator, 
-// which can do interpretation and compilation. 
+// which can do compilation(maybe interpretation too?).
 
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
+#include <stdbool.h>
 
 #define MEMORY_ALLOCATION_FAILURE   2
 #define MEMORY_REALLOCATION_FAILURE 3
+#define SYNTAX_ERROR                4
+
+#define ALZUR_TRUE                  1
+#define ALZUR_FALSE                 0
 
 #define global_variable static
 #define internal        static
@@ -41,15 +47,20 @@ typedef struct AST
   Token item;
   struct AST* left;
   struct AST* right;
-}AST;
+} AST;
 
 global_variable char* gBuffer;  // Global buffer, that contain text from source file
-global_variable char character; // Global character
+global_variable char  character; // Global character
+
 global_variable Token token;    // Global character
 
+global_variable Vector* gTokenVector;
+global_variable size_t  gTokenVectorIndex;
+
+global_variable AST* gAST;
 // ...
 
-AST* ASTInit()
+AST* alzur_ast_init()
 {
   AST* root = (AST*)malloc(sizeof(AST));
   if(root == NULL)
@@ -65,6 +76,119 @@ AST* ASTInit()
   root->right = NULL;
 
   return root;
+}
+
+AST* alzur_ast_add_item(AST* root, Token token)
+{
+  size_t token_string_size = strlen(token.token_value);
+
+  root->item.token_value = (char*)malloc(sizeof(char) * (token_string_size + 1));
+  if(root->item.token_value == NULL)
+  {
+    fprintf(stderr, "error: bad allocation in root: %p\n", (void*)root);
+    exit(MEMORY_ALLOCATION_FAILURE);
+  }
+
+  memcpy(root->item.token_type, token.token_value, token_string_size);
+
+  root->item.token_value[token_string_size] = '\0';
+  root->item.token_type = OPERATOR;
+
+  return root;
+}
+
+AST* alzur_ast_create_node(Token token)
+{
+  AST* new_node = (AST*)malloc(sizeof(AST));
+  if(new_node == NULL)
+  {
+    fprintf(stderr, "error: bad allocation in new_node: %p\n", (void*)new_node);
+    exit(MEMORY_ALLOCATION_FAILURE);
+  }
+
+  new_node->item.token_type = token.token_type;
+
+  size_t token_string_size = strlen(token.token_value);
+  new_node->item.token_value = (char*)malloc(sizeof(char) * (token_string_size + 1));
+  if(new_node->item.token_value == NULL)
+  {
+    fprintf(stderr, "error: bad allocation in new_node: %p\n", (void*)new_node);
+    exit(MEMORY_ALLOCATION_FAILURE);
+  }
+
+  memcpy(new_node->item.token_value, token.token_value, token_string_size); // copy string from func argument to new node
+
+  new_node->item.token_value[token_string_size] = '\0';
+
+  new_node->left = NULL;
+  new_node->right = NULL;
+
+  return new_node;
+}
+
+void alzur_ast_add_on_left(AST** node, Token token)
+{
+  if(*node == NULL)
+  {
+    *node = alzur_ast_create_node(token);
+  }
+  else if((*node)->left != NULL) // if u forget, node->left is a key to traverse next node's.
+  {
+    alzur_ast_add_on_left(&(*node)->left, token);
+  }
+  else
+  {
+    (*node)->left = alzur_ast_create_node(token);
+  }
+}
+
+void alzur_ast_add_on_right(AST** node, Token token)
+{
+  if(*node == NULL)
+  {
+    *node = alzur_ast_create_node(token);
+  }
+  else if((*node)->right != NULL)
+  {
+    alzur_ast_add_on_right(&(*node)->right, token);
+  }
+  else
+  {
+    (*node)->right = alzur_ast_create_node(token);
+  }
+}
+
+void alzur_ast_add_operator(AST** node, Token token)
+{
+  if((*node)->item.token_value == NULL)
+  {
+    alzur_ast_add_item(*node, token);
+  }
+}
+
+#define PRINT_TABS(x) for(size_t i = 0; i < x; i++) { printf("\t"); } // macro for ast traverse
+
+void alzur_ast_traverse_recursive(AST* root, size_t level)
+{
+  if(root != NULL)
+  {
+    PRINT_TABS(level)
+    printf("value = ( %s )\n", root->item.token_value);
+    
+    PRINT_TABS(level)
+    printf("left\n");
+    alzur_ast_traverse_recursive(root->left, level + 1);
+    
+    PRINT_TABS(level)
+    printf("right\n");
+    alzur_ast_traverse_recursive(root->right, level + 1);
+  }
+  return;
+}
+
+void alzur_ast_traverse(AST* root)
+{
+  alzur_ast_traverse_recursive(root, 0);
 }
 
 // Initialize vector object
@@ -89,8 +213,7 @@ Vector* VectorInit()
   return vec;
 }
 
-// Add token to vector
-void VectorAdd(Token token, Vector* vector)
+void VectorAdd(Token token, Vector* vector) // add token to vector
 {
   if(vector->capacity == vector->used)
   {
@@ -291,7 +414,7 @@ internal void IfTokenNotEmpty(Vector* vector, TokenType tok_type)
   if(token.token_value != NULL)
   {
     VectorAdd(token, vector);
-    free(token.token_value);
+    free(token.token_value);  
     token.token_value = NULL;
     token.token_type = tok_type;
     AddCharToToken(&token, character);
@@ -299,7 +422,7 @@ internal void IfTokenNotEmpty(Vector* vector, TokenType tok_type)
   }
   else
   {
-    token.token_type = OPERATOR;
+    token.token_type = tok_type;
     AddCharToToken(&token, character);
     VectorAdd(token, vector);
     free(token.token_value);
@@ -319,6 +442,7 @@ again:
     case 0:
       if(token.token_value != NULL)
         VectorAdd(token, vector);
+
       break;
     case ' ':
       if(token.token_value != NULL)
@@ -363,6 +487,7 @@ again:
     case '9':
       if(token.token_type == DIGIT || token.token_type == EMPTY)
       {
+        token.token_type = ALZUR_FALSE;
         token.token_type = DIGIT;
         AddCharToToken(&token, character);
         NextCharacter();
@@ -372,6 +497,7 @@ again:
       {
         FecthAndPushToVec(vector, EMPTY);
         AddCharToToken(&token, character);
+        token.token_type = ALZUR_FALSE;
         token.token_type = DIGIT;
         NextCharacter();
         goto again;
@@ -406,6 +532,105 @@ again:
   }
 }
 
+void NextToken()
+{
+  token = gTokenVector->token_buff[gTokenVectorIndex];
+  gTokenVectorIndex++;
+}
+
+// Grammar
+// <expr> := <term> {("+" | "-") <term>}
+// <term> = number {("*" | "/" number)}
+
+// 1 * 2 + 3 * 2 + 1
+
+internal uint8_t Term()
+{
+  if(token.token_type == DIGIT)
+  {
+    alzur_ast_add_on_left(&gAST, token);
+    NextToken();
+    if(token.token_type == MULTIPLY)
+    {
+      alzur_ast_add_operator(&gAST, token);
+      NextToken();
+      if(token.token_type == DIGIT)
+      {
+        if(Term())
+          return ALZUR_TRUE;
+        else
+          return ALZUR_FALSE;
+      }
+    }
+    else if(token.token_type == DIVIDE)
+    {
+      // something ...
+      NextToken();
+      if(token.token_type == DIGIT)
+      {
+        if(Term())
+          return ALZUR_TRUE;
+        else
+          return ALZUR_FALSE;
+      }
+    }
+    // if in term only one digit
+  }
+  else if(token.token_type == MULTIPLY)
+  {
+    // something ...
+    NextToken();
+    if(token.token_type == DIGIT)
+    {
+      // something ...
+      if(Term())
+        return ALZUR_TRUE;
+      else
+        return ALZUR_FALSE;
+    }
+  }
+  else if(token.token_type == DIVIDE)
+  {
+    // something ...
+    if(Term())
+        return ALZUR_TRUE;
+      else
+        return ALZUR_FALSE;
+  }
+  else if(token.token_type == ADD || token.token_type == SUBTRACT)
+    return ALZUR_TRUE;
+  else
+    return ALZUR_FALSE;
+  return 255; // need to explicitly return some uint8 value
+}
+
+internal uint8_t Expr()
+{
+  if(Term())
+  {
+    if(token.token_type == ADD)
+    {
+      if(Term())
+        return ALZUR_TRUE;
+      else
+        return ALZUR_FALSE;
+    }
+    else if(token.token_type == SUBTRACT)
+    {
+      if(Term())
+        return ALZUR_TRUE;
+      else
+        return ALZUR_FALSE;
+    }
+    else
+    {
+      return ALZUR_FALSE;
+    }
+  }
+  else
+    return ALZUR_FALSE;
+}
+
 internal void Parse(Vector* vector)
 {
   size_t SizeOfVector =    0;
@@ -416,11 +641,6 @@ internal void Parse(Vector* vector)
 
   while(SizeOfVector < vector->used)
   {
-
-    // S: OPERAND&OPERATOR&OPERAND
-    // OPERAND: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
-    // OPERATOR: + | - | * | /
-
     Token tok = vector->token_buff[SizeOfVector];
     if(tok.token_type == DIGIT)
     {
@@ -516,13 +736,11 @@ int main(int argc, char **argv)
     // ...
 
     // Interpretation 
-    if(strcmp(_f1, flag) == 0) { }
-    // Compilation
-    else if(strcmp(_f2, flag) == 0)
+    if(strcmp(_f1, flag) == 0) 
     {
       printf("filename: %s\n", argv[1]);
 
-      printf("Compilation...\n");
+      printf("Interpretation...\n");
 
       Vector* vector = VectorInit();
 
@@ -535,14 +753,57 @@ int main(int argc, char **argv)
       printf("%d\n", VectorSize(vector));
       VectorPrint(vector);
 
+      // global token pointer init
+      gTokenVector = vector;
+
       Parse(vector);
+
+      printf("%d\n", gTokenVectorIndex);
+      printf("%p\n\n", (void*)gTokenVector);
+
+      const char *str1 = "123";
+      const char *str2 = "321";
+
+      char* tok1 = (char*)malloc(sizeof(char) * (strlen(str1) + 1));
+      char* tok2 = (char*)malloc(sizeof(char) * (strlen(str2) + 1));
+
+      memcpy(tok1, str1, strlen(str1));
+      memcpy(tok2, str2, strlen(str2));
+
+      tok1[3] = '\0';
+      tok2[3] = '\0';
+
+      Token _token1;
+      _token1.token_type = DIGIT;
+      _token1.token_value = tok1;
+
+      Token _token2;
+      _token2.token_type = DIGIT;
+      _token2.token_value = tok2;
+
+      // example
+
+      AST* ast = NULL;
+      alzur_ast_add_on_left(&ast, _token1);
+
+      alzur_ast_add_on_left(&ast, _token1);
+      alzur_ast_add_on_left(&ast, _token2);
+
+      alzur_ast_add_on_right(&ast, _token2);
+      alzur_ast_add_on_right(&ast, _token2);
+
+      printf("===---AST Traverse---===\n");
+      alzur_ast_traverse(ast);
+      printf("===------------------===\n");
 
       free(gBuffer);
       free(token.token_value);
       VectorFree(vector);
-    } 
+    }
+    // Compilation
+    else if(strcmp(_f2, flag) == 0) { } 
     else 
-    { 
+    {
       printf("Incorrectly selected flag\n");
     }
 
