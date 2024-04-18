@@ -1,38 +1,103 @@
-// I just want to write my first compiler.
-// Alzur - basic programming language. This program is basic translator, 
-// which can do compilation(maybe interpretation too?).
+/**
+* I just want to write my first compiler.
+* Alzur - basic programming language. This program is basic translator, 
+* which can do compilation(maybe interpretation too?).
+*/
 
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 
+/**
+* usefull macro, macro-constants
+*/
+
+#define ALZUR_FALSE                 0
+#define ALZUR_TRUE                  1
 #define MEMORY_ALLOCATION_FAILURE   2
 #define MEMORY_REALLOCATION_FAILURE 3
 #define SYNTAX_ERROR                4
-
-#define ALZUR_TRUE                  1
-#define ALZUR_FALSE                 0
+#define EMPTY_VECTOR                5
 
 #define global_variable static
 #define internal        static
 
+#define PRINT_TABS(x) for(size_t i = 0; i < x; i++) { printf("\t"); } // macro for ast traverse
+
+/**
+* dynamic array implementation(strechy buffer), invented and implemented by Sean Barret.
+*/
+
+#define sbfree(a)         ((a) ? free(stb__sbraw(a)),0 : 0)
+#define sbpush(a,v)       (alzur__sbmaybegrow(a,1), (a)[alzur__sbn(a)++] = (v))
+#define sbcount(a)        ((a) ? alzur__sbn(a) : 0)
+#define sbadd(a,n)        (alzur__sbmaybegrow(a,n), alzur__sbn(a)+=(n), &(a)[alzur__sbn(a)-(n)])
+#define sblast(a)         ((a)[alzur__sbn(a)-1])
+
+#define alzur__sbraw(a) ((int *) (a) - 2)
+#define alzur__sbm(a)   alzur__sbraw(a)[0]
+#define alzur__sbn(a)   alzur__sbraw(a)[1]
+
+#define alzur__sbneedgrow(a,n)  ((a)==0 || alzur__sbn(a)+n >= alzur__sbm(a))
+#define alzur__sbmaybegrow(a,n) (alzur__sbneedgrow(a,(n)) ? alzur__sbgrow(a,n) : 0)
+#define alzur__sbgrow(a,n)  alzur__sbgrowf((void **) &(a), (n), sizeof(*(a)))
+
+static void alzur__sbgrowf(void **arr, int increment, int itemsize)
+{
+  int m = *arr ? 2*alzur__sbm(*arr)+increment : increment+1;
+  void *p = realloc(*arr ? alzur__sbraw(*arr) : 0, itemsize * m + sizeof(int)*2);
+  if (p)
+  {
+    if (!*arr) ((int *) p)[1] = 0;
+    *arr = (void *) ((int *) p + 2);
+    alzur__sbm(*arr) = m;
+  }
+}
+
+/////////////////////////////////////////////
+// some usefull data structs and typedef's //
+/////////////////////////////////////////////
+
+typedef uint8_t ALZUR_BOOL;
+
 typedef enum TokenType
 {
-  DIGIT = 0,
-  OPERATOR = 1,
-  ADD = 2,
-  SUBTRACT = 3,
-  MULTIPLY = 4,
-  DIVIDE = 5,
-  EMPTY = 255
+  DIGIT =       0,
+  OPERATOR =    1, // deprecated
+  ADD =         2,
+  SUBTRACT =    3,
+  MULTIPLY =    4,
+  DIVIDE =      5,
+
+  INTEGER =     6,
+  FLOAT =       7,
+  DOUBLE =      8,
+  STRING =      9,
+
+  EMPTY =       255
 } TokenType;
 
-typedef struct Token
+typedef struct arena_alloc
+{
+  size_t index;
+  size_t size;
+  char* data;
+} arena_alloc;
+
+typedef struct Token // TODO: refactor Token struct
 {
   TokenType token_type;
   char* token_value;
+  /*union
+  {
+    int32_t int_value;
+    float   float_value;
+    double  double_value;
+    char    char_value;
+  }; */
 } Token;
 
 typedef struct Vector
@@ -49,149 +114,206 @@ typedef struct AST
   struct AST* right;
 } AST;
 
+typedef struct abstract_syntax_tree
+{
+  // Token item;
+  TokenType token_type;
+  union
+  {
+    size_t  integer;
+    uint8_t operator; 
+  };
+  struct abstract_syntax_tree* left;
+  struct abstract_syntax_tree* right;
+} abstract_syntax_tree;
+
+///////////////////////////
+// some usefull global's //
+///////////////////////////
+
 global_variable char* gBuffer;  // Global buffer, that contain text from source file
 global_variable char  character; // Global character
 
-global_variable Token token;    // Global character
+global_variable Vector* gTokenVector; // global vector of lexed tokens
+global_variable Token gToken; // Global token
 
-global_variable Vector* gTokenVector;
-global_variable size_t  gTokenVectorIndex;
+/*
+* Arena allocator prototype(for now)
+*/
 
-global_variable AST* gAST;
-// ...
-
-AST* alzur_ast_init()
+arena_alloc* arena_create(size_t size)
 {
-  AST* root = (AST*)malloc(sizeof(AST));
-  if(root == NULL)
+  arena_alloc* new_arena = malloc(sizeof(arena_alloc));
+  if(new_arena == NULL)
   {
-    fprintf(stderr, "error: bad allocation in root: %p\n", (void*)root);
+    fprintf(stderr,"error: bad allocation new_arena");
+    return NULL;
+  }
+
+  new_arena->data = malloc(size);
+  if(new_arena->data == NULL)
+  {
+    fprintf(stderr,"error: bad allocation new_arena->data");
+    return NULL;
+  }
+
+  new_arena->index = 0;
+  new_arena->size = size;
+
+  return new_arena;
+};
+
+void* arena_allocate(arena_alloc* arena, size_t size)
+{
+  if(arena == NULL)
+  {
+    fprintf(stderr, "error: cant alloc from empty arena");
+    return NULL;
+  }
+
+  arena->index += size;
+  return arena->data + (arena->index - size); 
+}
+
+void arena_clear(arena_alloc* arena)
+{
+  if(arena == NULL)
+  {
+    return;
+  }
+  arena->index = 0;
+}
+
+void arena_destroy(arena_alloc* arena)
+{
+  if(arena == NULL)
+  {
+    return;
+  }
+
+  if(arena->data != NULL)
+    free(arena->data);
+
+  free(arena);
+}
+
+///////////////////////////
+///////////////////////////
+///////////////////////////
+
+FILE* err_out_file_init()
+{
+  FILE* file = fopen("alzur_error_log.txt", "w+");
+  if(!file)
+  {
+    fprintf(stderr, "error while opening alzur_error_log\n");
+  }
+
+  return file;
+}
+
+void err_out_file_close(FILE* file)
+{
+  fclose(file);
+}
+
+abstract_syntax_tree* create_node_for_integer(size_t value)
+{ 
+  abstract_syntax_tree* node = malloc(sizeof(abstract_syntax_tree));
+  if(node == NULL)
+  {
+    fprintf(stderr, "error: bad allocation in ast: %p\n", (void*)node);
     exit(MEMORY_ALLOCATION_FAILURE);
   }
 
-  root->item.token_type  = EMPTY;
-  root->item.token_value = NULL;
+  node->integer = value;
+  node->left = NULL;
+  node->right = NULL;
+  node->token_type = DIGIT;
 
-  root->left  = NULL;
-  root->right = NULL;
+  printf("create_node_for_integer(): %d\n", node->integer);
 
-  return root;
+  return node;
 }
 
-AST* alzur_ast_add_item(AST* root, Token token)
-{
-  size_t token_string_size = strlen(token.token_value);
+abstract_syntax_tree* create_node_for_operator(uint8_t op)
+{ 
+  abstract_syntax_tree* node;
 
-  root->item.token_value = (char*)malloc(sizeof(char) * (token_string_size + 1));
-  if(root->item.token_value == NULL)
+  node = malloc(sizeof(abstract_syntax_tree));
+  if(node == NULL)
   {
-    fprintf(stderr, "error: bad allocation in root: %p\n", (void*)root);
+    fprintf(stderr, "error: bad allocation in ast: %p\n", (void*)node);
     exit(MEMORY_ALLOCATION_FAILURE);
   }
 
-  memcpy(root->item.token_type, token.token_value, token_string_size);
+  node->operator = op;
+  node->left = NULL;
+  node->right = NULL;
 
-  root->item.token_value[token_string_size] = '\0';
-  root->item.token_type = OPERATOR;
+  printf("create_node_for_operator(): %d\n", node->integer);
 
-  return root;
+  return node;
 }
 
-AST* alzur_ast_create_node(Token token)
+abstract_syntax_tree* create_tree_for_binary
+(
+abstract_syntax_tree* left,        // abstract_syntax_tree*
+uint8_t binary_op,  // abstract_syntax_tree*
+abstract_syntax_tree* right
+)
 {
-  AST* new_node = (AST*)malloc(sizeof(AST));
-  if(new_node == NULL)
-  {
-    fprintf(stderr, "error: bad allocation in new_node: %p\n", (void*)new_node);
-    exit(MEMORY_ALLOCATION_FAILURE);
-  }
+  abstract_syntax_tree* ast_root;
 
-  new_node->item.token_type = token.token_type;
+  // constructing root node
+  
+  ast_root = create_node_for_operator(binary_op);
 
-  size_t token_string_size = strlen(token.token_value);
-  new_node->item.token_value = (char*)malloc(sizeof(char) * (token_string_size + 1));
-  if(new_node->item.token_value == NULL)
-  {
-    fprintf(stderr, "error: bad allocation in new_node: %p\n", (void*)new_node);
-    exit(MEMORY_ALLOCATION_FAILURE);
-  }
+  ast_root->left = left;
+  ast_root->right = right;
+  ast_root->token_type = binary_op;
+  printf("\n");
+  printf("[ast_root]->%d\n", ast_root->operator);
+  printf("\n");
 
-  memcpy(new_node->item.token_value, token.token_value, token_string_size); // copy string from func argument to new node
-
-  new_node->item.token_value[token_string_size] = '\0';
-
-  new_node->left = NULL;
-  new_node->right = NULL;
-
-  return new_node;
+  return ast_root;
 }
 
-void alzur_ast_add_on_left(AST** node, Token token)
+void print_abstract_syntax_tree(abstract_syntax_tree* tree, size_t space)
 {
-  if(*node == NULL)
+  if(tree == NULL)
+    return;
+  
+  space += 5;
+
+  print_abstract_syntax_tree(tree->right, space);
+
+  printf("\n");
+  for(int i = 5; i < space; i++)
+    printf(" ");
+  
+  switch (tree->token_type)
   {
-    *node = alzur_ast_create_node(token);
+  case DIGIT:
+    printf("%d\n", tree->integer);
+    break;
+  case ADD:
+  case SUBTRACT:
+  case MULTIPLY:
+  case DIVIDE:
+    printf("%d\n", tree->operator);
+    break;      
+  default:
+    break;
   }
-  else if((*node)->left != NULL) // if u forget, node->left is a key to traverse next node's.
-  {
-    alzur_ast_add_on_left(&(*node)->left, token);
-  }
-  else
-  {
-    (*node)->left = alzur_ast_create_node(token);
-  }
+
+  print_abstract_syntax_tree(tree->left, space);
 }
 
-void alzur_ast_add_on_right(AST** node, Token token)
-{
-  if(*node == NULL)
-  {
-    *node = alzur_ast_create_node(token);
-  }
-  else if((*node)->right != NULL)
-  {
-    alzur_ast_add_on_right(&(*node)->right, token);
-  }
-  else
-  {
-    (*node)->right = alzur_ast_create_node(token);
-  }
-}
-
-void alzur_ast_add_operator(AST** node, Token token)
-{
-  if((*node)->item.token_value == NULL)
-  {
-    alzur_ast_add_item(*node, token);
-  }
-}
-
-#define PRINT_TABS(x) for(size_t i = 0; i < x; i++) { printf("\t"); } // macro for ast traverse
-
-void alzur_ast_traverse_recursive(AST* root, size_t level)
-{
-  if(root != NULL)
-  {
-    PRINT_TABS(level)
-    printf("value = ( %s )\n", root->item.token_value);
-    
-    PRINT_TABS(level)
-    printf("left\n");
-    alzur_ast_traverse_recursive(root->left, level + 1);
-    
-    PRINT_TABS(level)
-    printf("right\n");
-    alzur_ast_traverse_recursive(root->right, level + 1);
-  }
-  return;
-}
-
-void alzur_ast_traverse(AST* root)
-{
-  alzur_ast_traverse_recursive(root, 0);
-}
+///////////////////////////
 
 // Initialize vector object
+// TODO: Init with only 1 slot capacity? think about it
 Vector* VectorInit()
 {
   Vector* vec = (Vector*)malloc(sizeof(Vector));
@@ -201,7 +323,7 @@ Vector* VectorInit()
     exit(MEMORY_ALLOCATION_FAILURE);
   }
 
-  vec->capacity = 1;
+  vec->capacity = 1; // TODO: Init with only 1 slot capacity? think about it
   vec->used = 0;
   vec->token_buff = (Token*)malloc(sizeof(Token) * vec->capacity);
   if(vec->token_buff == NULL)
@@ -291,12 +413,12 @@ void VectorFree(Vector* vector)
   free(vector);
 }
 
-uint64_t ChrToInt(const char* str)
+size_t ascii_to_int(const char* str)
 {
   size_t index = 0;
   size_t strSize = strlen(str);
 
-  uint64_t result = 0;
+  size_t result = 0;
 
   if(strSize == 1)
   {
@@ -403,31 +525,31 @@ internal void NextCharacter()
 
 internal void FecthAndPushToVec(Vector* vector, TokenType tok_type)
 {
-  VectorAdd(token, vector);
-  free(token.token_value);
-  token.token_value = NULL;
-  token.token_type = tok_type;
+  VectorAdd(gToken, vector);
+  free(gToken.token_value);
+  gToken.token_value = NULL;
+  gToken.token_type = tok_type;
 }
 
 internal void IfTokenNotEmpty(Vector* vector, TokenType tok_type)
 {
-  if(token.token_value != NULL)
+  if(gToken.token_value != NULL)
   {
-    VectorAdd(token, vector);
-    free(token.token_value);  
-    token.token_value = NULL;
-    token.token_type = tok_type;
-    AddCharToToken(&token, character);
+    VectorAdd(gToken, vector);
+    free(gToken.token_value);  
+    gToken.token_value = NULL;
+    gToken.token_type = tok_type;
+    AddCharToToken(&gToken, character);
     NextCharacter();
   }
   else
   {
-    token.token_type = tok_type;
-    AddCharToToken(&token, character);
-    VectorAdd(token, vector);
-    free(token.token_value);
-    token.token_value = NULL;
-    token.token_type = EMPTY;
+    gToken.token_type = tok_type;
+    AddCharToToken(&gToken, character);
+    VectorAdd(gToken, vector);
+    free(gToken.token_value);
+    gToken.token_value = NULL;
+    gToken.token_type = EMPTY;
     NextCharacter();
   }
 }
@@ -440,12 +562,12 @@ again:
   switch (character)
   {
     case 0:
-      if(token.token_value != NULL)
-        VectorAdd(token, vector);
+      if(gToken.token_value != NULL)
+        VectorAdd(gToken, vector);
 
       break;
     case ' ':
-      if(token.token_value != NULL)
+      if(gToken.token_value != NULL)
       {
         FecthAndPushToVec(vector, EMPTY);
         NextCharacter();
@@ -459,7 +581,7 @@ again:
         break;
       }
     case '\n': // TODO: Fix white space after new line bug
-      if(token.token_value != NULL)
+      if(gToken.token_value != NULL)
       {
         FecthAndPushToVec(vector, EMPTY);
         NextCharacter();
@@ -485,26 +607,26 @@ again:
     case '7':
     case '8':
     case '9':
-      if(token.token_type == DIGIT || token.token_type == EMPTY)
+      if(gToken.token_type == DIGIT || gToken.token_type == EMPTY)
       {
-        token.token_type = ALZUR_FALSE;
-        token.token_type = DIGIT;
-        AddCharToToken(&token, character);
+        gToken.token_type = ALZUR_FALSE;
+        gToken.token_type = DIGIT;
+        AddCharToToken(&gToken, character);
         NextCharacter();
         goto again;
       }
       else
       {
         FecthAndPushToVec(vector, EMPTY);
-        AddCharToToken(&token, character);
-        token.token_type = ALZUR_FALSE;
-        token.token_type = DIGIT;
+        AddCharToToken(&gToken, character);
+        gToken.token_type = ALZUR_FALSE;
+        gToken.token_type = DIGIT;
         NextCharacter();
         goto again;
       }
       /*
-      token.token_type = DIGIT;
-      AddCharToToken(&token, character);
+      gToken.token_type = DIGIT;
+      AddCharToToken(&gToken, character);
       NextCharacter();
       goto again;
       break;
@@ -532,184 +654,134 @@ again:
   }
 }
 
-void NextToken()
+Token* create_empty_token()
 {
-  token = gTokenVector->token_buff[gTokenVectorIndex];
-  gTokenVectorIndex++;
+  Token* empty = malloc(sizeof(Token));
+  empty->token_type = EMPTY;
+  empty->token_value = NULL;
+
+  return empty;
+}
+
+//
+// get_next_token() work with gToken, *gTokenVector
+//
+internal Token get_next_token()
+{
+  static size_t count = 1;
+  static size_t i = 0;
+
+  if(count > gTokenVector->used)
+  {
+    // вернуть пустой токен, как сигнал о том, что токены кончились 
+    fprintf(stderr, "error: token_vector is empty\n");
+    Token empty_token = {EMPTY, NULL};
+
+    return empty_token; 
+  }
+
+  gToken = gTokenVector->token_buff[i];
+  fprintf(stderr, "token[%d] fetched: %s\n", count, gToken.token_value);
+
+  i++;
+  count++;
+
+  return gToken;
+}
+
+internal size_t parse_digit()
+{
+  Token next = get_next_token();
+
+  size_t value = 0;
+
+  if(next.token_type == DIGIT)
+  {
+    value = ascii_to_int(next.token_value);
+    fprintf(stderr,"digit parsed: %d\n", value);
+  }
+  else if(next.token_type == EMPTY)
+  {
+    fprintf(stderr,"[DEBUG]: Empty token vector\n");
+  }
+  else
+  {
+    fprintf(stderr, "[DEBUG]: syntax error - seems like incorrect token type of digit\n");
+  }
+
+  return value;
+}
+
+bool is_operator(Token* operator)
+{
+  if(operator->token_type == ADD ||
+     operator->token_type == SUBTRACT ||
+     operator->token_type == DIVIDE ||
+     operator->token_type == MULTIPLY)
+  {
+    return ALZUR_TRUE;
+  }
+
+  return ALZUR_FALSE;
 }
 
 // Grammar
 // <expr> := <term> {("+" | "-") <term>}
 // <term> = number {("*" | "/" number)}
-
+// <number> = {"0" | "1" | "2" | ... | "9"}
 // 1 * 2 + 3 * 2 + 1
 
-internal uint8_t Term()
+/**
+* 1 + 2 + 3 : expression
+*
+*     3
+*    /\
+*   + 3
+*  /\
+* 1  2
+*
+*/
+
+internal abstract_syntax_tree* parse_single_binary(abstract_syntax_tree* left)
 {
-  if(token.token_type == DIGIT)
+  Token next = get_next_token();
+
+  // if there is something else
+  // or we done, and there is none tokens
+  if(is_operator(&next))
   {
-    alzur_ast_add_on_left(&gAST, token);
-    NextToken();
-    if(token.token_type == MULTIPLY)
-    {
-      alzur_ast_add_operator(&gAST, token);
-      NextToken();
-      if(token.token_type == DIGIT)
-      {
-        if(Term())
-          return ALZUR_TRUE;
-        else
-          return ALZUR_FALSE;
-      }
-    }
-    else if(token.token_type == DIVIDE)
-    {
-      // something ...
-      NextToken();
-      if(token.token_type == DIGIT)
-      {
-        if(Term())
-          return ALZUR_TRUE;
-        else
-          return ALZUR_FALSE;
-      }
-    }
-    // if in term only one digit
-  }
-  else if(token.token_type == MULTIPLY)
-  {
-    // something ...
-    NextToken();
-    if(token.token_type == DIGIT)
-    {
-      // something ...
-      if(Term())
-        return ALZUR_TRUE;
-      else
-        return ALZUR_FALSE;
-    }
-  }
-  else if(token.token_type == DIVIDE)
-  {
-    // something ...
-    if(Term())
-        return ALZUR_TRUE;
-      else
-        return ALZUR_FALSE;
-  }
-  else if(token.token_type == ADD || token.token_type == SUBTRACT)
-    return ALZUR_TRUE;
-  else
-    return ALZUR_FALSE;
-  return 255; // need to explicitly return some uint8 value
+    printf("operator: %d\n", next.token_type);
+    size_t right = parse_digit();
+    abstract_syntax_tree* right_node = create_node_for_integer(right);
+    return create_tree_for_binary(left, next.token_type, right_node);
+  } else
+  return left;
 }
 
-internal uint8_t Expr()
+/**
+* This is where whole expression is parsing
+*/
+internal abstract_syntax_tree* parse_expression()
 {
-  if(Term())
+  size_t left = parse_digit();
+  abstract_syntax_tree* left_node = create_node_for_integer(left);
+
+  while(true)
   {
-    if(token.token_type == ADD)
-    {
-      if(Term())
-        return ALZUR_TRUE;
-      else
-        return ALZUR_FALSE;
-    }
-    else if(token.token_type == SUBTRACT)
-    {
-      if(Term())
-        return ALZUR_TRUE;
-      else
-        return ALZUR_FALSE;
-    }
-    else
-    {
-      return ALZUR_FALSE;
-    }
+    abstract_syntax_tree* new_ast_tree = parse_single_binary(left_node);
+    printf("address of left_node: %p\n", (void*)left_node);
+
+    if(new_ast_tree == left_node)
+      return left_node;
+
+    left_node = new_ast_tree;
   }
-  else
-    return ALZUR_FALSE;
+
 }
 
-internal void Parse(Vector* vector)
-{
-  size_t SizeOfVector =    0;
-  uint64_t left_operand =  0;
-  uint64_t right_operand = 0;
-
-  TokenType operator_type;
-
-  while(SizeOfVector < vector->used)
-  {
-    Token tok = vector->token_buff[SizeOfVector];
-    if(tok.token_type == DIGIT)
-    {
-      // TODO: add insert() in tree
-      left_operand = ChrToInt(vector->token_buff[SizeOfVector].token_value);
-      SizeOfVector++;
-      tok = vector->token_buff[SizeOfVector];
-      if(tok.token_type == ADD ||
-         tok.token_type == SUBTRACT ||
-         tok.token_type == MULTIPLY ||
-         tok.token_type == DIVIDE)
-      {
-        if(tok.token_type == ADD)
-          operator_type = ADD;
-        else if(tok.token_type == SUBTRACT)
-          operator_type = SUBTRACT;
-        else if(tok.token_type == MULTIPLY)
-          operator_type = MULTIPLY;
-        else
-          operator_type = DIVIDE;
-
-        SizeOfVector++;
-        tok = vector->token_buff[SizeOfVector];
-        if(tok.token_type == DIGIT)
-        {
-          if(operator_type == ADD)
-          {
-            right_operand = ChrToInt(vector->token_buff[SizeOfVector].token_value);
-            printf("result: %d\n", left_operand+right_operand);
-          }  
-          else if(operator_type == SUBTRACT)
-          {
-            right_operand = ChrToInt(vector->token_buff[SizeOfVector].token_value);
-            printf("result: %d\n", left_operand-right_operand);
-          }
-          else if(operator_type == MULTIPLY)
-          {
-            right_operand = ChrToInt(vector->token_buff[SizeOfVector].token_value);
-            printf("result: %d\n", left_operand*right_operand);
-          }
-          else
-          {
-            right_operand = ChrToInt(vector->token_buff[SizeOfVector].token_value);
-            printf("result: %d\n", left_operand/right_operand);
-          }
-          
-          break;
-        }
-        else
-        {
-          fprintf(stderr, "syntax error\n");
-          break;
-        }
-      }
-      else
-      {
-        fprintf(stderr, "syntax error\n");
-        break;
-      }
-    }
-    else
-    {
-      fprintf(stderr, "syntax error\n");
-      break;
-    }
-
-    SizeOfVector++;
-  }
-}
+internal void alzur_print_in_red   (const char* s) { printf("\033[3;43;30mTexting\033[0m\t\t", s); }
+internal void alzur_print_in_green (const char* s) { printf("\033[32m %s \033[0m", s); }
+internal void alzur_print_in_purple(const char* s) { printf("\033[35m %s \033[0m", s); }
 
 int main(int argc, char **argv)
 {
@@ -740,65 +812,32 @@ int main(int argc, char **argv)
     {
       printf("filename: %s\n", argv[1]);
 
-      printf("Interpretation...\n");
-
-      Vector* vector = VectorInit();
+      printf("Interpretation...\n\n");
+      
+      // setup for lexing and parsing
+      gToken.token_value = NULL;
+      Vector* vector_of_tokens = VectorInit();
 
       ScanSourceFile(argv[1]);
 
-      token.token_value = NULL;
-
       NextCharacter();
-      Tokenizer(vector);
-      printf("%d\n", VectorSize(vector));
-      VectorPrint(vector);
+      Tokenizer(vector_of_tokens);
 
+      printf("vector_of_tokens size: %d\n\n", VectorSize(vector_of_tokens));
+
+      VectorPrint(vector_of_tokens);
+      printf("\n\n");
       // global token pointer init
-      gTokenVector = vector;
+      gTokenVector = vector_of_tokens;
 
-      Parse(vector);
-
-      printf("%d\n", gTokenVectorIndex);
-      printf("%p\n\n", (void*)gTokenVector);
-
-      const char *str1 = "123";
-      const char *str2 = "321";
-
-      char* tok1 = (char*)malloc(sizeof(char) * (strlen(str1) + 1));
-      char* tok2 = (char*)malloc(sizeof(char) * (strlen(str2) + 1));
-
-      memcpy(tok1, str1, strlen(str1));
-      memcpy(tok2, str2, strlen(str2));
-
-      tok1[3] = '\0';
-      tok2[3] = '\0';
-
-      Token _token1;
-      _token1.token_type = DIGIT;
-      _token1.token_value = tok1;
-
-      Token _token2;
-      _token2.token_type = DIGIT;
-      _token2.token_value = tok2;
-
-      // example
-
-      AST* ast = NULL;
-      alzur_ast_add_on_left(&ast, _token1);
-
-      alzur_ast_add_on_left(&ast, _token1);
-      alzur_ast_add_on_left(&ast, _token2);
-
-      alzur_ast_add_on_right(&ast, _token2);
-      alzur_ast_add_on_right(&ast, _token2);
-
-      printf("===---AST Traverse---===\n");
-      alzur_ast_traverse(ast);
-      printf("===------------------===\n");
-
+      // parsing
+      abstract_syntax_tree* expr_tree = parse_expression();
+      printf("\n\n");
+      print_abstract_syntax_tree(expr_tree, 0);
       free(gBuffer);
-      free(token.token_value);
-      VectorFree(vector);
+      free(gToken.token_value);
+      free(expr_tree);
+      VectorFree(vector_of_tokens);
     }
     // Compilation
     else if(strcmp(_f2, flag) == 0) { } 
