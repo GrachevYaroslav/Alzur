@@ -31,29 +31,29 @@
 * dynamic array implementation(strechy buffer), invented and implemented by Sean Barret.
 */
 
-#define sbfree(a)         ((a) ? free(stb__sbraw(a)),0 : 0)
-#define sbpush(a,v)       (alzur__sbmaybegrow(a,1), (a)[alzur__sbn(a)++] = (v))
-#define sbcount(a)        ((a) ? alzur__sbn(a) : 0)
-#define sbadd(a,n)        (alzur__sbmaybegrow(a,n), alzur__sbn(a)+=(n), &(a)[alzur__sbn(a)-(n)])
-#define sblast(a)         ((a)[alzur__sbn(a)-1])
+#define sbfree(a)         ((a) ? free(sbraw(a)),0 : 0)
+#define sbpush(a,v)       (sbmaybegrow(a,1), (a)[sbn(a)++] = (v))
+#define sbcount(a)        ((a) ? sbn(a) : 0)
+#define sbadd(a,n)        (sbmaybegrow(a,n), sbn(a)+=(n), &(a)[sbn(a)-(n)])
+#define sblast(a)         ((a)[sbn(a)-1])
 
-#define alzur__sbraw(a) ((int *) (a) - 2)
-#define alzur__sbm(a)   alzur__sbraw(a)[0]
-#define alzur__sbn(a)   alzur__sbraw(a)[1]
+#define sbraw(a) ((int *) (a) - 2)
+#define sbm(a)   sbraw(a)[0]
+#define sbn(a)   sbraw(a)[1]
 
-#define alzur__sbneedgrow(a,n)  ((a)==0 || alzur__sbn(a)+n >= alzur__sbm(a))
-#define alzur__sbmaybegrow(a,n) (alzur__sbneedgrow(a,(n)) ? alzur__sbgrow(a,n) : 0)
-#define alzur__sbgrow(a,n)  alzur__sbgrowf((void **) &(a), (n), sizeof(*(a)))
+#define sbneedgrow(a,n)  ((a)==0 || sbn(a)+n >= sbm(a))
+#define sbmaybegrow(a,n) (sbneedgrow(a,(n)) ? sbgrow(a,n) : 0)
+#define sbgrow(a,n)  sbgrowf((void **) &(a), (n), sizeof(*(a)))
 
-static void alzur__sbgrowf(void **arr, int increment, int itemsize)
+static void sbgrowf(void **arr, int increment, int itemsize)
 {
-  int m = *arr ? 2*alzur__sbm(*arr)+increment : increment+1;
-  void *p = realloc(*arr ? alzur__sbraw(*arr) : 0, itemsize * m + sizeof(int)*2);
+  int m = *arr ? 2*sbm(*arr)+increment : increment+1;
+  void *p = realloc(*arr ? sbraw(*arr) : 0, itemsize * m + sizeof(int)*2);
   if (p)
   {
     if (!*arr) ((int *) p)[1] = 0;
     *arr = (void *) ((int *) p + 2);
-    alzur__sbm(*arr) = m;
+    sbm(*arr) = m;
   }
 }
 
@@ -136,6 +136,14 @@ global_variable char  character; // Global character
 
 global_variable Vector* gTokenVector; // global vector of lexed tokens
 global_variable Token gToken; // Global token
+global_variable size_t gCurrentTokenIndex = 0; // index(count) of current token used in gTokenVector
+
+///////////////////////////
+// function declarations //
+///////////////////////////
+
+internal abstract_syntax_tree* parse_expression(uint8_t);
+internal abstract_syntax_tree* parse_single_binary(abstract_syntax_tree*, uint8_t);
 
 /*
 * Arena allocator prototype(for now)
@@ -298,10 +306,16 @@ void print_abstract_syntax_tree(abstract_syntax_tree* tree, size_t space)
     printf("%d\n", tree->integer);
     break;
   case ADD:
+    printf("+\n");
+    break;
   case SUBTRACT:
+    printf("-\n");
+    break;
   case MULTIPLY:
+    printf("*\n");
+    break;
   case DIVIDE:
-    printf("%d\n", tree->operator);
+    printf("/\n");
     break;      
   default:
     break;
@@ -666,10 +680,26 @@ Token* create_empty_token()
 //
 // get_next_token() work with gToken, *gTokenVector
 //
+
+internal Token look_ahead_next_token()
+{ 
+  Token nextToken = gTokenVector->token_buff[gCurrentTokenIndex];
+  gCurrentTokenIndex++;
+
+  return nextToken;
+}
+
+internal void next_token()
+{
+  gToken = look_ahead_next_token();
+}
+
 internal Token get_next_token()
 {
   static size_t count = 1;
   static size_t i = 0;
+
+  gCurrentTokenIndex = i;
 
   if(count > gTokenVector->used)
   {
@@ -680,13 +710,14 @@ internal Token get_next_token()
     return empty_token; 
   }
 
-  gToken = gTokenVector->token_buff[i];
-  fprintf(stderr, "token[%d] fetched: %s\n", count, gToken.token_value);
+  Token lToken = gTokenVector->token_buff[i];
+  fprintf(stderr, "token[%d] fetched: %s\n", count, lToken.token_value);
 
   i++;
   count++;
+  gCurrentTokenIndex++;
 
-  return gToken;
+  return lToken;
 }
 
 internal size_t parse_digit()
@@ -726,10 +757,9 @@ bool is_operator(Token* operator)
 }
 
 // Grammar
-// <expr> := <term> {("+" | "-") <term>}
-// <term> = number {("*" | "/" number)}
-// <number> = {"0" | "1" | "2" | ... | "9"}
-// 1 * 2 + 3 * 2 + 1
+// E := T {"+"|"-"T}
+// T = F{"*"|"/"F}
+// F = 0...9
 
 /**
 * 1 + 2 + 3 : expression
@@ -742,46 +772,165 @@ bool is_operator(Token* operator)
 *
 */
 
-internal abstract_syntax_tree* parse_single_binary(abstract_syntax_tree* left)
+abstract_syntax_tree* parse_factor()
+{
+  printf("parse_F start\n");
+
+  abstract_syntax_tree* result;
+
+  if(gToken.token_type == DIGIT)
+  {
+    result = create_node_for_integer(ascii_to_int(gToken.token_value));
+    if(result == NULL)
+    {
+      printf("error while creating node for integer\n");
+      return result;
+    }
+
+    next_token();
+  }
+  else
+  {
+    printf("parsing error in factor\n");
+    return NULL;
+  }
+
+  return result;
+}
+
+abstract_syntax_tree* parse_term()
+{
+  printf("parse_T start\n");
+  
+  abstract_syntax_tree* result = parse_factor();
+  if(result == NULL)
+  {
+    printf("error in factor parsing\n");
+    return result;
+  }
+
+  while(gToken.token_type == MULTIPLY || gToken.token_type == DIVIDE)
+  {
+    uint8_t op = gToken.token_type;
+    next_token();
+    abstract_syntax_tree* right = parse_factor();
+    if(right == NULL)
+    {
+      printf("error in factor parsing\n");
+      return result;
+    }
+
+    result = create_tree_for_binary(result, op, right);
+    if(result == NULL)
+    {
+      printf("error while creating node for binary\n");
+      return result;
+    }
+  }
+
+  return result;
+}
+
+abstract_syntax_tree* parse_expr()
+{
+  printf("parse_expression start\n");
+  
+  abstract_syntax_tree* result = parse_term();
+  if(result == NULL)
+  {
+    printf("error in term parsing\n");
+    return result;
+  }
+
+  while(gToken.token_type == ADD || gToken.token_type == SUBTRACT)
+  {
+    uint8_t op = gToken.token_type;
+    next_token();
+    abstract_syntax_tree* right = parse_term();
+    if(right == NULL)
+    {
+      printf("error in term parsing\n");
+      return result;
+    }
+
+    result = create_tree_for_binary(result, op, right);
+    if(result == NULL)
+    {
+      printf("error while creating node for binary\n");
+      return result;
+    }
+  }
+
+  return result;
+}
+
+internal uint8_t operator_precedence(Token* operator)
+{
+  switch (operator->token_type)
+  {
+  case ADD:
+  case SUBTRACT:
+    return 1;  
+  case MULTIPLY:
+  case DIVIDE:
+    return 2;
+  default:
+    break;
+  }
+  return 0;
+}
+
+//////////////////////////
+
+#if 0
+
+internal abstract_syntax_tree* parse_single_binary(abstract_syntax_tree* left, uint8_t min_precedence)
 {
   Token next = get_next_token();
 
   // if there is something else
   // or we done, and there is none tokens
-  if(is_operator(&next))
+  if(!is_operator(&next))
+    return left;
+  
+  uint8_t next_precedence = operator_precedence(&next);
+  printf("precedence of operator_type %d is %d\n", next.token_type, next_precedence);
+
+  if(next_precedence <= min_precedence)
+    return left;
+  else
   {
-    printf("operator: %d\n", next.token_type);
-    size_t right = parse_digit();
-    abstract_syntax_tree* right_node = create_node_for_integer(right);
+    abstract_syntax_tree* right_node = parse_expression(next_precedence);
     return create_tree_for_binary(left, next.token_type, right_node);
-  } else
-  return left;
+  }
 }
 
 /**
 * This is where whole expression is parsing
 */
-internal abstract_syntax_tree* parse_expression()
+internal abstract_syntax_tree* parse_expression(uint8_t min_precedence)
 {
   size_t left = parse_digit();
   abstract_syntax_tree* left_node = create_node_for_integer(left);
 
   while(true)
   {
-    abstract_syntax_tree* new_ast_tree = parse_single_binary(left_node);
+    abstract_syntax_tree* node = parse_single_binary(left_node, min_precedence);
     printf("address of left_node: %p\n", (void*)left_node);
 
-    if(new_ast_tree == left_node)
-      return left_node;
+    if(node == left_node)
+      break;
 
-    left_node = new_ast_tree;
+    left_node = node;
   }
-
+  return left_node;
 }
 
 internal void alzur_print_in_red   (const char* s) { printf("\033[3;43;30mTexting\033[0m\t\t", s); }
 internal void alzur_print_in_green (const char* s) { printf("\033[32m %s \033[0m", s); }
 internal void alzur_print_in_purple(const char* s) { printf("\033[35m %s \033[0m", s); }
+
+#endif
 
 int main(int argc, char **argv)
 {
@@ -796,8 +945,6 @@ int main(int argc, char **argv)
   else if(argc == 3)
   {
     // ...
-    const char _f1[] = "i";
-    const char _f2[] = "c";
     uint8_t _size_of_console_arg_ = strlen(argv[2]);
     char* flag = (char*)malloc((sizeof(char)*_size_of_console_arg_)+sizeof(char));
     for(uint8_t i = 0; i < _size_of_console_arg_; ++i)
@@ -808,7 +955,7 @@ int main(int argc, char **argv)
     // ...
 
     // Interpretation 
-    if(strcmp(_f1, flag) == 0) 
+    if(strcmp("i", flag) == 0) 
     {
       printf("filename: %s\n", argv[1]);
 
@@ -831,7 +978,12 @@ int main(int argc, char **argv)
       gTokenVector = vector_of_tokens;
 
       // parsing
-      abstract_syntax_tree* expr_tree = parse_expression();
+      next_token();
+      abstract_syntax_tree* expr_tree = parse_expr();
+      if(expr_tree == NULL)
+      {
+        printf("something went wrong while parsing\n");
+      }
       printf("\n\n");
       print_abstract_syntax_tree(expr_tree, 0);
       free(gBuffer);
@@ -840,7 +992,7 @@ int main(int argc, char **argv)
       VectorFree(vector_of_tokens);
     }
     // Compilation
-    else if(strcmp(_f2, flag) == 0) { } 
+    else if(strcmp("c", flag) == 0) { } 
     else 
     {
       printf("Incorrectly selected flag\n");
