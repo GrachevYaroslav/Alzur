@@ -21,6 +21,7 @@
 #define MEMORY_REALLOCATION_FAILURE 3
 #define SYNTAX_ERROR                4
 #define EMPTY_VECTOR                5
+#define FILE_OPEN_ERROR             6
 
 #define global_variable static
 #define internal        static
@@ -76,6 +77,13 @@ typedef enum TokenType
   FLOAT =       7,
   DOUBLE =      8,
   STRING =      9,
+
+  LEFT_BRACE =  10,
+  RIGHT_BRACE = 11,
+
+  WORD =        12,
+  EQUALS =      13,
+  SEMICOLON =   14,
 
   EMPTY =       255
 } TokenType;
@@ -139,11 +147,36 @@ global_variable Token gToken; // Global token
 global_variable size_t gCurrentTokenIndex = 0; // index(count) of current token used in gTokenVector
 
 ///////////////////////////
-// function declarations //
+///////////////////////////
 ///////////////////////////
 
 internal abstract_syntax_tree* parse_expression(uint8_t);
-internal abstract_syntax_tree* parse_single_binary(abstract_syntax_tree*, uint8_t);
+internal abstract_syntax_tree* parse_single_binary(abstract_syntax_tree*, uint8_t); 
+internal abstract_syntax_tree* parse_expr();
+
+void* amalloc(size_t n_bytes)
+{
+  void* ptr = malloc(n_bytes);
+  if(!ptr)
+  {
+    fprintf(stderr, "error: amalloc failed");
+    exit(1);
+  }
+
+  return ptr;
+}
+
+void* arealloc(void* source, size_t n_bytes)
+{
+  void* ptr = realloc(source, n_bytes);
+  if(!ptr)
+  {
+    fprintf(stderr, "error: arealloc failed");
+    exit(1);
+  }
+
+  return ptr;
+}
 
 /*
 * Arena allocator prototype(for now)
@@ -303,19 +336,19 @@ void print_abstract_syntax_tree(abstract_syntax_tree* tree, size_t space)
   switch (tree->token_type)
   {
   case DIGIT:
-    printf("%d\n", tree->integer);
+    printf("(d: %d )\n", tree->integer);
     break;
   case ADD:
-    printf("+\n");
+    printf("(op: + )\n");
     break;
   case SUBTRACT:
-    printf("-\n");
+    printf("(op: - )\n");
     break;
   case MULTIPLY:
-    printf("*\n");
+    printf("(op: * )\n");
     break;
   case DIVIDE:
-    printf("/\n");
+    printf("(op: / )\n");
     break;      
   default:
     break;
@@ -413,10 +446,54 @@ void VectorPrint(Vector* vector)
     printf("[VEC_DEBUG]: %d elements in vector\n", vector->used);
     for(size_t i = 0; i <  vector->used; i++)
     {
-      printf("[VEC_DEBUG]: value of %d token: type - ( %d ), value - ( %s )\n", (i+1), 
-      vector->token_buff[i].token_type, 
-      vector->token_buff[i].token_value
-      );
+      printf("[VEC_DEBUG]: value of %d token: value - ( %s ), type - ( ", (i+1), vector->token_buff[i].token_value);
+      switch (vector->token_buff[i].token_type)
+      {
+      case DIGIT:
+        printf("digit )\n");
+        break;
+      case ADD:
+        printf("add )\n");
+        break;
+      case SUBTRACT:
+        printf("subtract )\n");
+        break;
+      case MULTIPLY:
+        printf("multiply )\n");
+        break;
+      case DIVIDE:
+        printf("divide )\n");
+        break;
+      case INTEGER:
+        printf("integer )\n");
+        break;
+      case DOUBLE:
+        printf("double )\n");
+        break;
+      case STRING:
+        printf("string )\n");
+        break;
+      case FLOAT:
+        printf("float )\n");
+        break;
+      case LEFT_BRACE:
+        printf("left brace )\n");
+        break;
+      case RIGHT_BRACE:
+        printf("right brace )\n");
+        break;
+      case WORD:
+        printf("word )\n");
+        break;
+      case EQUALS:
+        printf("equals )\n");
+        break;
+      case SEMICOLON:
+        printf("semicolon )\n");
+        break;
+      default:
+        break;
+      };
     }
   }
 }
@@ -549,12 +626,13 @@ internal void IfTokenNotEmpty(Vector* vector, TokenType tok_type)
 {
   if(gToken.token_value != NULL)
   {
-    VectorAdd(gToken, vector);
-    free(gToken.token_value);  
-    gToken.token_value = NULL;
-    gToken.token_type = tok_type;
+    FecthAndPushToVec(vector, tok_type);
     AddCharToToken(&gToken, character);
-    NextCharacter();
+    VectorAdd(gToken, vector);
+    free(gToken.token_value);
+    gToken.token_value = NULL;
+    gToken.token_type = EMPTY;
+    //NextCharacter();
   }
   else
   {
@@ -564,12 +642,14 @@ internal void IfTokenNotEmpty(Vector* vector, TokenType tok_type)
     free(gToken.token_value);
     gToken.token_value = NULL;
     gToken.token_type = EMPTY;
-    NextCharacter();
+    //NextCharacter();
   }
 }
 
-// Tokenizer, function that break sentence into tokens
-// and put them in vector of tokens
+/** 
+ * Tokenizer, function that break expression into tokens
+ * and put them in vector of tokens
+*/ 
 internal void Tokenizer(Vector* vector)
 {
 again:
@@ -586,31 +666,33 @@ again:
         FecthAndPushToVec(vector, EMPTY);
         NextCharacter();
         goto again;
-        break;
-      }
-      else
-      {
-        NextCharacter();
-        goto again;
-        break;
-      }
-    case '\n': // TODO: Fix white space after new line bug
-      if(gToken.token_value != NULL)
-      {
-        FecthAndPushToVec(vector, EMPTY);
-        NextCharacter();
-        goto again;
       }
       else
       {
         NextCharacter();
         goto again;
       }
-      break;
+    case '\n': case '\r':
+      NextCharacter();
+      goto again;
     case '\t':
       NextCharacter();
       goto again;
-      break;
+    case 'a': case 'b': case 'c': case 'd': case 'e': case 'f': case 'g': case 'h': case 'i': case 'j':
+    case 'k': case 'l': case 'm': case 'n': case 'o': case 'p': case 'q': case 'r': case 's': case 't':
+    case 'u': case 'v': case 'w': case 'x': case 'y': case 'z':
+    case 'A': case 'B': case 'C': case 'D': case 'E': case 'F': case 'G': case 'H': case 'I': case 'J':
+    case 'K': case 'L': case 'M': case 'N': case 'O': case 'P': case 'Q': case 'R': case 'S': case 'T':
+    case 'U': case 'V': case 'W': case 'X': case 'Y': case 'Z':
+    case '_':
+      printf("char here\n");
+      if(gToken.token_type == EMPTY || gToken.token_type == WORD || gToken.token_type == DIGIT)
+      {
+        gToken.token_type = WORD;
+        AddCharToToken(&gToken, character);
+        NextCharacter();
+      }
+      goto again; 
     case '0':
     case '1':
     case '2':
@@ -627,7 +709,6 @@ again:
         gToken.token_type = DIGIT;
         AddCharToToken(&gToken, character);
         NextCharacter();
-        goto again;
       }
       else
       {
@@ -636,8 +717,8 @@ again:
         gToken.token_type = ALZUR_FALSE;
         gToken.token_type = DIGIT;
         NextCharacter();
-        goto again;
       }
+      goto again;
       /*
       gToken.token_type = DIGIT;
       AddCharToToken(&gToken, character);
@@ -648,24 +729,113 @@ again:
     case '+': // TODO: Fix operator handling
       IfTokenNotEmpty(vector, ADD);
       goto again;
-      break;
     case '-':
       IfTokenNotEmpty(vector, SUBTRACT);
       goto again;
-      break;
     case '*':
       IfTokenNotEmpty(vector, MULTIPLY);
       goto again;
-      break;
     case '/':
       IfTokenNotEmpty(vector, DIVIDE);
       goto again;
-      break;
-    default:
-      NextCharacter();
+    case '(':
+      IfTokenNotEmpty(vector, LEFT_BRACE);
       goto again;
+    case ')':
+      IfTokenNotEmpty(vector, RIGHT_BRACE);
+      goto again;
+    case '=':
+      IfTokenNotEmpty(vector, EQUALS);
+      goto again;
+    case ';':
+      IfTokenNotEmpty(vector, SEMICOLON);
+    default:
       break;
   }
+}
+
+internal void lexer(Vector* vec_of_tokens, const char* filename)
+{
+  FILE* file = fopen(filename, "r");
+  if(file == NULL)
+  {
+    fprintf(stderr, "file was not opened");
+    exit(FILE_OPEN_ERROR);
+  }
+
+  while((character = getc(file)) != EOF)
+  {
+    switch (character)
+    {
+    case '\n': case '\r': case ' ':
+      if(gToken.token_value != NULL)
+      {
+        FecthAndPushToVec(vec_of_tokens, EMPTY);
+      }
+      break;
+    case '0': case '1': case '2': case '3': case '4': case '5': case '6': case '7': case '8': case '9':
+      if(gToken.token_type == EMPTY || gToken.token_type == DIGIT)
+      {
+        gToken.token_type = DIGIT;
+        AddCharToToken(&gToken, character);
+        NextCharacter();
+      }
+      else
+      {
+        FecthAndPushToVec(vec_of_tokens, EMPTY);
+        AddCharToToken(&gToken, character);
+        gToken.token_type = DIGIT;
+        NextCharacter();
+      }
+      break;
+    case 'a': case 'b': case 'c': case 'd': case 'e': case 'f': case 'g': case 'h': case 'i': case 'j':
+    case 'k': case 'l': case 'm': case 'n': case 'o': case 'p': case 'q': case 'r': case 's': case 't':
+    case 'u': case 'v': case 'w': case 'x': case 'y': case 'z':
+    case 'A': case 'B': case 'C': case 'D': case 'E': case 'F': case 'G': case 'H': case 'I': case 'J':
+    case 'K': case 'L': case 'M': case 'N': case 'O': case 'P': case 'Q': case 'R': case 'S': case 'T':
+    case 'U': case 'V': case 'W': case 'X': case 'Y': case 'Z':
+    case '_':
+      if(gToken.token_type == EMPTY || gToken.token_type == WORD || gToken.token_type == DIGIT)
+      {
+        gToken.token_type = WORD;
+        AddCharToToken(&gToken, character);
+        NextCharacter();
+      }
+      break;
+    case '+': // TODO: Fix operator handling
+      IfTokenNotEmpty(vec_of_tokens, ADD);
+      break;
+    case '-':
+      IfTokenNotEmpty(vec_of_tokens, SUBTRACT);
+      break;
+    case '*':
+      IfTokenNotEmpty(vec_of_tokens, MULTIPLY);
+      break;
+    case '/':
+      IfTokenNotEmpty(vec_of_tokens, DIVIDE);
+      break;
+    case '(':
+      IfTokenNotEmpty(vec_of_tokens, LEFT_BRACE);
+      break;
+    case ')':
+      IfTokenNotEmpty(vec_of_tokens, RIGHT_BRACE);
+      break;
+    case '=':
+      IfTokenNotEmpty(vec_of_tokens, EQUALS);
+      break;
+    case ';':
+      IfTokenNotEmpty(vec_of_tokens, SEMICOLON);
+      break;
+    default:
+      break;
+    }
+  }
+  if(gToken.token_value != NULL)
+  {
+    FecthAndPushToVec(vec_of_tokens, EMPTY);
+  }
+
+  fclose(file);
 }
 
 Token* create_empty_token()
@@ -785,6 +955,19 @@ abstract_syntax_tree* parse_factor()
     {
       printf("error while creating node for integer\n");
       return result;
+    }
+
+    next_token();
+  }
+  else if(gToken.token_type == LEFT_BRACE)
+  {
+    next_token();
+    result = parse_expr();
+
+    if(gToken.token_type != RIGHT_BRACE)
+    {
+      printf("syntax error: ')' is missing\n");
+      return NULL;
     }
 
     next_token();
@@ -966,7 +1149,14 @@ int main(int argc, char **argv)
       Vector* vector_of_tokens = VectorInit();
 
       ScanSourceFile(argv[1]);
+      lexer(vector_of_tokens, argv[1]);
+      printf("vector_of_tokens size: %d\n\n", VectorSize(vector_of_tokens));
 
+      VectorPrint(vector_of_tokens);
+      printf("\n\n");
+      
+#if 0
+      gToken.token_type = EMPTY;
       NextCharacter();
       Tokenizer(vector_of_tokens);
 
@@ -976,8 +1166,10 @@ int main(int argc, char **argv)
       printf("\n\n");
       // global token pointer init
       gTokenVector = vector_of_tokens;
+#endif
 
       // parsing
+#if 0      
       next_token();
       abstract_syntax_tree* expr_tree = parse_expr();
       if(expr_tree == NULL)
@@ -986,9 +1178,10 @@ int main(int argc, char **argv)
       }
       printf("\n\n");
       print_abstract_syntax_tree(expr_tree, 0);
+      free(expr_tree);
+#endif      
       free(gBuffer);
       free(gToken.token_value);
-      free(expr_tree);
       VectorFree(vector_of_tokens);
     }
     // Compilation
