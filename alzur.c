@@ -1,37 +1,71 @@
 /**
-* I just want to write my first compiler.
 * Alzur - basic programming language. This program is basic translator,
 * which can do compilation(maybe interpretation too?).
 */
 
 /*
-
   -*syntax specification*-
-program      = { function | statement } ;
+program          = { function | statement }
 
-function     = "func" IDENTIFIER "(" [ parameters ] ")" "{" { statement } "}" ;
-parameters   = IDENTIFIER { "," IDENTIFIER } ;
+function         = "func" IDENTIFIER "(" parameters_opt ")" "{" statement_list "}"
+parameters_opt   = parameters | ε
+parameters       = IDENTIFIER parameter_list
+parameter_list   = { "," IDENTIFIER }
 
-statement    = if_stmt | while_stmt | return_stmt | assign_stmt | expr_stmt ;
+statement        = if_stmt
+				 | while_stmt
+				 | return_stmt
+				 | assignment_or_call_stmt ; // Левая факторизация для IDENTIFIER
 
-if_stmt      = "if" "(" expr ")" "{" { statement } "}" [ "else" "{" { statement } "}" ] ;
-while_stmt   = "while" "(" expr ")" "{" { statement } "}" ;
-return_stmt  = "return" [ expr ] ";" ;
-assign_stmt  = IDENTIFIER "=" expr ";" ;
-expr_stmt    = expr ";" ;
+statement_list   = { statement }
 
-expr         = logical_or ;
-logical_or   = logical_and { "||" logical_and } ;
-logical_and  = equality { "&&" equality } ;
-equality     = comparison { ("==" | "!=") comparison } ;
-comparison   = term { ("<" | ">" | "<=" | ">=") term } ;
-term         = factor { ("+" | "-") factor } ;
-factor       = unary { ("*" | "/") unary } ;
-unary        = ("!" | "-") unary | primary ;
-primary      = NUMBER | IDENTIFIER | "(" expr ")" | call ;
-call         = IDENTIFIER "(" [ arguments ] ")" ;
-arguments    = expr { "," expr } ;
+if_stmt          = "if" "(" expr ")" "{" statement_list "}" else_stmt_opt
+else_stmt_opt    = "else" "{" statement_list "}" | ε
+while_stmt       = "while" "(" expr ")" "{" statement_list "}"
+return_stmt      = "return" expr_opt ";"
+expr_opt         = expr | ε
 
+// Это ключевое место для LL-совместимости:
+// Теперь, когда мы видим IDENTIFIER, мы знаем, что это либо присваивание, либо вызов функции.
+// Мы используем следующий токен (lookahead) после IDENTIFIER, чтобы решить.
+assignment_or_call_stmt = IDENTIFIER assignment_or_call_suffix ";"
+assignment_or_call_suffix = "=" expr // Это assign_stmt
+						  | "(" arguments_opt ")" ; // Это call_stmt
+
+// Правила для выражений - преобразованы для устранения левой рекурсии
+expr             = logical_or_terminal
+logical_or_terminal = logical_and_terminal logical_or_tail
+logical_or_tail  = "||" logical_and_terminal logical_or_tail | ε
+
+logical_and_terminal = equality_terminal logical_and_tail
+logical_and_tail = "&&" equality_terminal logical_and_tail | ε
+
+equality_terminal = comparison_terminal equality_tail
+equality_tail    = ("==" | "!=") comparison_terminal equality_tail | ε
+
+comparison_terminal = term_terminal comparison_tail
+comparison_tail  = ("<" | ">" | "<=" | ">=") term_terminal comparison_tail | ε
+
+term_terminal    = factor_terminal term_tail
+term_tail        = ("+" | "-") factor_terminal term_tail | ε
+
+factor_terminal  = unary_terminal factor_tail
+factor_tail      = ("*" | "/") unary_terminal factor_tail | ε
+
+unary_terminal   = ("!" | "-") unary_terminal
+				 | primary_terminal
+
+primary_terminal = NUMBER
+				 | IDENTIFIER
+				 | "(" expr ")"
+				 | call_primary ; // Call теперь является частью primary, чтобы избежать дублирования
+
+call_primary     = IDENTIFIER "(" arguments_opt ")"
+arguments_opt    = arguments | ε
+arguments        = expr argument_list
+argument_list    = { "," expr }
+
+// Правила для токенов (регулярные выражения)
 identifier := letter {letter | number}.
 letter := "a" ... "z" | "A" ... "Z".
 number := "1" ... "9".
@@ -56,6 +90,7 @@ number := "1" ... "9".
 #define SYNTAX_ERROR                4
 #define EMPTY_VECTOR                5
 #define FILE_OPEN_ERROR             6
+#define SYNTAX_ERROR				7
 
 #define global_variable static
 #define internal        static
@@ -84,6 +119,7 @@ typedef enum {
 	RIGHT_BRACE,
 	EQUALS,
 	EQUAL_EQUAL,
+	NOT,
 	NOT_EQUAL,
 	LOGICAL_NOT,
 	LOGICAL_AND,
@@ -120,6 +156,10 @@ typedef struct arena_alloc {
 	char* data;
 } arena_alloc;
 
+/**
+* token struct
+*/
+
 typedef struct Token { // TODO: refactor Token struct
 	TokenType token_type;
 
@@ -130,38 +170,13 @@ typedef struct Token { // TODO: refactor Token struct
 		char* token_value;
 	} value;
 
-	uint32_t  line_count;
-	uint32_t  in_line_pos;
+	uint32_t  line_count;  // line
+	uint32_t  in_line_pos; // col
 } Token;
 
-typedef struct Vector {
-	Token* token_buff; // Array that contain all tokens
-
-	size_t capacity;
-	size_t used;
-} Vector;
-
-typedef struct AST {
-	Token item;
-
-	struct AST* left;
-	struct AST* right;
-} AST;
-
-typedef struct abstract_syntax_tree {
-	// Token item;
-	TokenType token_type;
-
-	union {
-		size_t  integer;
-		uint8_t operator;
-	};
-
-	// add more than two node pointers in onde node
-	struct abstract_syntax_tree** nodes;
-	struct abstract_syntax_tree* left;
-	struct abstract_syntax_tree* right;
-} abstract_syntax_tree;
+/**
+* parse tree struct
+*/
 
 typedef struct {
 	Token token;
@@ -169,7 +184,7 @@ typedef struct {
 } parse_tree;
 
 /**
-* interface for input_stream
+* input stream struct
 */
 
 typedef struct input_stream {
@@ -434,100 +449,6 @@ void arena_destroy(arena_alloc* arena) {
 *
 */
 
-abstract_syntax_tree* create_node_for_integer(size_t value)
-{
-	abstract_syntax_tree* node = malloc(sizeof(abstract_syntax_tree));
-	if (node == NULL)
-	{
-		fprintf(stderr, "error: bad allocation in ast: %p\n", (void*)node);
-		exit(MEMORY_ALLOCATION_FAILURE);
-	}
-
-	node->integer = value;
-	node->left = NULL;
-	node->right = NULL;
-	node->token_type = DIGIT;
-
-	printf("create_node_for_integer(): %d\n", node->integer);
-
-	return node;
-}
-
-abstract_syntax_tree* create_node_for_operator(uint8_t op)
-{
-	abstract_syntax_tree* node;
-
-	node = malloc(sizeof(abstract_syntax_tree));
-	if (node == NULL)
-	{
-		fprintf(stderr, "error: bad allocation in ast: %p\n", (void*)node);
-		exit(MEMORY_ALLOCATION_FAILURE);
-	}
-
-	node->operator = op;
-	node->left = NULL;
-	node->right = NULL;
-
-	printf("create_node_for_operator(): %d\n", node->integer);
-
-	return node;
-}
-
-abstract_syntax_tree* create_tree_for_binary(abstract_syntax_tree* left, uint8_t binary_op, abstract_syntax_tree* right)
-{
-	abstract_syntax_tree* ast_root;
-
-	// constructing root node
-
-	ast_root = create_node_for_operator(binary_op);
-
-	ast_root->left = left;
-	ast_root->right = right;
-	ast_root->token_type = binary_op;
-	printf("\n");
-	printf("[ast_root]->%d\n", ast_root->operator);
-	printf("\n");
-
-	return ast_root;
-}
-
-void print_abstract_syntax_tree(abstract_syntax_tree* tree, size_t space)
-{
-	if (tree == NULL)
-		return;
-
-	space += 5;
-
-	print_abstract_syntax_tree(tree->right, space);
-
-	printf("\n");
-	for (int i = 5; i < space; i++)
-		printf(" ");
-
-	switch (tree->token_type)
-	{
-	case DIGIT:
-		printf("(d: %d )\n", tree->integer);
-		break;
-	case ADD:
-		printf("(op: + )\n");
-		break;
-	case SUBTRACT:
-		printf("(op: - )\n");
-		break;
-	case MULTIPLY:
-		printf("(op: * )\n");
-		break;
-	case DIVIDE:
-		printf("(op: / )\n");
-		break;
-	default:
-		break;
-	}
-
-	print_abstract_syntax_tree(tree->left, space);
-}
-
 Token create_eof_token() {
 	Token token;
 
@@ -537,15 +458,77 @@ Token create_eof_token() {
 	return token;
 }
 
-Token create_token(TokenType t, const char* v, uint32_t len, uint32_t line_c, uint32_t line_p) {
+Token create_not_terminal_token(TokenType type, uint32_t line, uint32_t col) {
+	Token token;
+
+	token.line_count = line;
+	token.in_line_pos = col;
+
+	switch (type) {
+	case ROOT:
+		token.token_type = ROOT;
+
+		char* root = "root";
+		token.value.token_value = amalloc(strlen(root) + 1);
+		token.value.token_value[strlen(root)] = '\0';
+
+		memcpy(token.value.token_value, root, strlen(root));
+		break;
+	case FUNC:
+		token.token_type = FUNC;
+
+		char* func = "func";
+		token.value.token_value = amalloc(strlen(func) + 1);
+		token.value.token_value[strlen(func)] = '\0';
+
+		memcpy(token.value.token_value, func, strlen(func));
+		break;
+	case STATEMENT:
+		token.token_type = STATEMENT;
+
+		char* statement = "statement";
+		token.value.token_value = amalloc(strlen(statement) + 1);
+		token.value.token_value[strlen(statement)] = '\0';
+
+		memcpy(token.value.token_value, statement, strlen(statement));
+		break;
+	case IF:
+		token.token_type = IF;
+
+		char* if_ = "if";
+		token.value.token_value = amalloc(strlen(if_) + 1);
+		token.value.token_value[strlen(if_)] = '\0';
+
+		memcpy(token.value.token_value, if_, strlen(if_));
+		break;
+	case WHILE:
+		token.token_type = WHILE;
+
+		char* while_ = "while";
+		token.value.token_value = amalloc(strlen(while_) + 1);
+		token.value.token_value[strlen(while_)] = '\0';
+
+		memcpy(token.value.token_value, while_, strlen(while_));
+		break;
+	}
+
+	return token;
+}
+
+Token create_token(TokenType t, const char* v, uint32_t len, uint32_t line, uint32_t col) {
 	Token token;
 
 	token.token_type = t;
-	token.line_count = line_c;
-	token.in_line_pos = line_p;
+	token.line_count = line;
+	token.in_line_pos = col;
+
+	if (v == NULL) {
+		token.value.token_value = NULL;
+		return token;
+	}
 
 	token.value.token_value = amalloc(len + 1);
-
+	token.value.token_value[len] = '\0';
 	// copying characters to token
 	memcpy(token.value.token_value, v, len);
 
@@ -572,8 +555,8 @@ input_stream* input_stream_init(const char* filename) {
 		printf("error while opening file: %s\n", filename);
 
 	is->current_char = '\0';
-	is->line = 0;
-	is->col = 1;
+	is->line = 1;
+	is->col = 0;
 	is->eof_reached = FALSE;
 
 	return is;
@@ -676,7 +659,7 @@ Token tokenize_number(input_stream* is) {
 	}
 	sbpush(tmp_buff_for_digit, '\0');
 
-	token = create_token(DIGIT, tmp_buff_for_digit, sbcount(tmp_buff_for_digit), is->col, is->line);
+	token = create_token(DIGIT, tmp_buff_for_digit, sbcount(tmp_buff_for_digit) - 1, is->col, is->line);
 	sbfree(tmp_buff_for_digit);
 
 	return token;
@@ -699,13 +682,13 @@ Token tokenize_identifier_or_keyword(input_stream* is) {
 	// Comparing strings to find collision with reserved keyword
 	for (uint8_t i = 0; i < RESERVED_KEYWORDS_COUNT; i++) {
 		if (strcmp(tmp_buff_for_lexeme, reserved_keywords[i].keyword) == 0) {
-			token = create_token(reserved_keywords[i].type, tmp_buff_for_lexeme, sbcount(tmp_buff_for_lexeme), is->col, is->line);
+			token = create_token(reserved_keywords[i].type, tmp_buff_for_lexeme, sbcount(tmp_buff_for_lexeme) - 1, is->col, is->line);
 			sbfree(tmp_buff_for_lexeme);
 			return token;
 		}
 	}
 
-	token = create_token(IDENTIFIER, tmp_buff_for_lexeme, sbcount(tmp_buff_for_lexeme), is->col, is->line);
+	token = create_token(IDENTIFIER, tmp_buff_for_lexeme, sbcount(tmp_buff_for_lexeme) - 1, is->col, is->line);
 	sbfree(tmp_buff_for_lexeme);
 
 	return token;
@@ -839,6 +822,28 @@ Token get_next_token(input_stream* is) {
 	}
 }
 
+Token peek_next_token(input_stream* is) {
+	if (is->eof_reached) {
+		return create_eof_token();
+	}
+
+	uint64_t file_pos = ftell(is->file); // saving position in file before peeking forward
+	uint64_t line = is->line;
+	uint64_t col = is->col;
+	char current_char = is->current_char;
+	bool eof_reached = is->eof_reached;
+
+	Token next_token = get_next_token(is);
+
+	fseek(is->file, file_pos, SEEK_SET); // restore file position after peeking next token
+	is->line = line;
+	is->col = col;
+	is->current_char = current_char;
+	is->eof_reached = eof_reached;
+
+	return next_token;
+}
+
 parse_tree* tree_create_leaf(Token token) {
 	parse_tree* t = amalloc(sizeof(parse_tree));
 
@@ -860,7 +865,127 @@ void tree_traverse(parse_tree* t, int depth) {
 		printf("  ");
 	}
 
-	printf("value - %s, leafs - %d\n", t->token.value.token_value, sbcount(t->leafs));
+	if (t->token.value.token_value != NULL) {
+		switch(t->token.token_type) {
+			case DIGIT:
+				printf("TOKEN[ type: DIGIT\t lexeme: %s ] \n", t->token.value.token_value);
+				break;
+			case ADD:
+				printf("TOKEN[ type: ADD\t lexeme: %s ] \n", t->token.value.token_value);
+				break;
+			case SUBTRACT:
+				printf("TOKEN[ type: SUBTRACT\t lexeme: %s ] \n", t->token.value.token_value);
+				break;
+			case MULTIPLY:
+				printf("TOKEN[ type: MULTIPLY\t lexeme: %s ] \n", t->token.value.token_value);
+				break;
+			case DIVIDE:
+				printf("TOKEN[ type: DIVIDE\t lexeme: %s ] \n", t->token.value.token_value);
+				break;
+			case IDENTIFIER:
+				printf("TOKEN[ type: IDENTIFIER\t lexeme: %s ] \n", t->token.value.token_value);
+				break;
+			case LEFT_BRACKET:
+				printf("TOKEN[ type: LEFT_BRACKET\t lexeme: %s ] \n", t->token.value.token_value);
+				break;
+			case RIGHT_BRACKET:
+				printf("TOKEN[ type: RIGHT_BRACKET\t lexeme: %s ] \n", t->token.value.token_value);
+				break;
+			case LEFT_BRACE:
+				printf("TOKEN[ type: LEFT_BRACE\t lexeme: %s ] \n", t->token.value.token_value);
+				break;
+			case RIGHT_BRACE:
+				printf("TOKEN[ type: RIGHT_BRACE\t lexeme: %s ] \n", t->token.value.token_value);
+				break;
+			case EQUALS:
+				printf("TOKEN[ type: EQUALS\t lexeme: %s ] \n", t->token.value.token_value);
+				break;
+			case EQUAL_EQUAL:
+				printf("TOKEN[ type: EQUAL_EQUAL\t lexeme: %s ] \n", t->token.value.token_value);
+				break;
+			case NOT:
+				printf("TOKEN[ type: NOT\t lexeme: %s ] \n", t->token.value.token_value);
+				break;
+			case NOT_EQUAL:
+				printf("TOKEN[ type: NOT_EQUAL\t lexeme: %s ] \n", t->token.value.token_value);
+				break;
+			case LOGICAL_NOT:
+				printf("TOKEN[ type: LOGICAL_NOT\t lexeme: %s ] \n", t->token.value.token_value);
+				break;
+			case LOGICAL_AND:
+				printf("TOKEN[ type: LOGICAL_AND\t lexeme: %s ] \n", t->token.value.token_value);
+				break;
+			case LOGICAL_OR:
+				printf("TOKEN[ type: LOGICAL_OR\t lexeme: %s ] \n", t->token.value.token_value);
+				break;
+			case LESS:
+				printf("TOKEN[ type: LESS\t lexeme: %s ] \n", t->token.value.token_value);
+				break;
+			case LESS_EQUAL:
+				printf("TOKEN[ type: LESS_EQUAL\t lexeme: %s ] \n", t->token.value.token_value);
+				break;
+			case GREATER:
+				printf("TOKEN[ type: GREATER\t lexeme: %s ] \n", t->token.value.token_value);
+				break;
+			case GREATER_EQUAL:
+				printf("TOKEN[ type: GREATER_EQUAL\t lexeme: %s ] \n", t->token.value.token_value);
+				break;
+			case COLON:
+				printf("TOKEN[ type: COLON\t lexeme: %s ] \n", t->token.value.token_value);
+				break;
+			case SEMICOLON:
+				printf("TOKEN[ type: SEMICOLON\t lexeme: %s ] \n", t->token.value.token_value);
+				break;
+			case COMMA:
+				printf("TOKEN[ type: COMMA\t lexeme: %s ] \n", t->token.value.token_value);
+				break;
+			case CONST:
+				printf("TOKEN[ type: CONST\t lexeme: %s ] \n", t->token.value.token_value);
+				break;
+			case VAR:
+				printf("TOKEN[ type: VAR\t lexeme: %s ] \n", t->token.value.token_value);
+				break;
+			case INT:
+				printf("TOKEN[ type: INT\t lexeme: %s ] \n", t->token.value.token_value);
+				break;
+			case CHAR:
+				printf("TOKEN[ type: CHAR\t lexeme: %s ] \n", t->token.value.token_value);
+				break;
+			case BOOl:
+				printf("TOKEN[ type: BOOl\t lexeme: %s ] \n", t->token.value.token_value);
+				break;
+			case FLOAT:
+				printf("TOKEN[ type: FLOAT\t lexeme: %s ] \n", t->token.value.token_value);
+				break;
+			case IF:
+				printf("TOKEN[ type: IF\t lexeme: %s ] \n", t->token.value.token_value);
+				break;
+			case ELSE:
+				printf("TOKEN[ type: ELSE\t lexeme: %s ] \n", t->token.value.token_value);
+				break;
+			case WHILE:
+				printf("TOKEN[ type: WHILE\t lexeme: %s ] \n", t->token.value.token_value);
+				break;
+			case RETURN:
+				printf("TOKEN[ type: RETURN\t lexeme: %s ] \n", t->token.value.token_value);
+				break;
+			case FUNC:
+				printf("TOKEN[ type: FUNC\t lexeme: %s ] \n", t->token.value.token_value);
+				break;
+			case ROOT:
+				printf("TOKEN[ type: ROOT\t lexeme: %s ] \n", t->token.value.token_value);
+				break;
+			case STATEMENT:
+				printf("TOKEN[ type: STATEMENT\t lexeme: %s ] \n", t->token.value.token_value);
+				break;
+			case END_OF_FILE:
+				printf("TOKEN [\n\t type: END_OF_FILE\n\t ] \n");
+				break;
+			default:
+				printf("unknown token\n");
+				break;
+		};
+	}
 
 	for (int i = 0; i < sbcount(t->leafs); i++) {
 		tree_traverse(t->leafs[i], depth + 1);
@@ -868,124 +993,761 @@ void tree_traverse(parse_tree* t, int depth) {
 }
 
 /*
-* implementation of terminals
+* Implementation of terminals
 */
 
-void parse_function(input_stream* is, parse_tree* root);
-void parse_parametrs_opt(input_stream* is, parse_tree* parent);
+Token current_parsed_token; // global token for parsing functions
+bool has_errors = false;
+
+void advance_token(input_stream* is) {
+	current_parsed_token = get_next_token(is);
+}
+
+void report_error(input_stream* is, const char* msg, Token token) {
+    fprintf(stderr, "Error at %u:%u: %s (Found: '%s')\n",
+            token.line_count, token.in_line_pos, msg,
+            token.value.token_value ? token.value.token_value : "EOF/NULL"); // Обработка NULL для EOF
+    has_errors = true; // Устанавливаем флаг ошибки
+}
+
+void sync_to(input_stream* is, TokenType* sync_points, size_t count) {
+    while (current_parsed_token.token_type != END_OF_FILE) {
+        bool found_sync_point = false;
+        for (size_t i = 0; i < count; i++) {
+            if (current_parsed_token.token_type == sync_points[i]) {
+                found_sync_point = true;
+                break;
+            }
+        }
+        if (found_sync_point) {
+            break; // Найден синхронизирующий токен, выходим
+        }
+        advance_token(is); // Пропускаем текущий токен
+    }
+    // Если токен был найден, он останется текущим.
+    // Если END_OF_FILE, цикл завершится.
+}
+
+bool is_valid_expression_start(TokenType token_type) {
+    switch (token_type) {
+        // Допустимые начала выражений:
+        case DIGIT:        // Число (например, 42)
+        case IDENTIFIER:   // Идентификатор (например, x)
+        case LEFT_BRACKET: // Открывающая скобка '('
+        case SUBTRACT:     // Унарный минус (-x)
+        case NOT:          // Логическое НЕ (!x)
+        case LOGICAL_NOT:  // Альтернативное НЕ (если есть)
+            return true;
+        default:
+            return false;
+    }
+}
+
+// --- Forward Declarations for Parser Functions ---
+
+bool parse_function(input_stream* is, parse_tree* root);
+void parse_parameters_opt(input_stream* is, parse_tree* parent);
+void parse_statement(input_stream* is, parse_tree* parent);
 void parse_statement_list(input_stream* is, parse_tree* root);
+void parse_expression(input_stream* is, parse_tree* root);
+void parse_assignment_or_call_stmt(input_stream* is, parse_tree* root);
+void parse_assignment_or_call_suffix(input_stream* is, parse_tree* root);
+void parse_else_stmt_opt(input_stream* is, parse_tree* root);
+void parse_logical_or_terminal(input_stream* is, parse_tree* root);
+void parse_logical_or_tail(input_stream* is, parse_tree* root);
+void parse_logical_and_terminal(input_stream* is, parse_tree* root);
+void parse_logical_and_tail(input_stream* is, parse_tree* root);
+void parse_equality_tail(input_stream* is, parse_tree* root);
+void parse_equality_terminal(input_stream* is, parse_tree* root);
+void parse_comparison_tail(input_stream* is, parse_tree* root);
+void parse_comparison_terminal(input_stream* is, parse_tree* root);
+void parse_term_tail(input_stream* is, parse_tree* root);
+void parse_term_terminal(input_stream* is, parse_tree* root);
+void parse_factor_tail(input_stream* is, parse_tree* root);
+void parse_factor_terminal(input_stream* is, parse_tree* root);
+void parse_unary_terminal(input_stream* is, parse_tree* root);
+void parse_primary_terminal(input_stream* is, parse_tree* root);
+void parse_call_primary(input_stream* is, parse_tree* root);
+void parse_arguments_opt(input_stream* is, parse_tree* root);
+void parse_argument_list(input_stream* is, parse_tree* root);
+
+// --- Parser Implementations ---
 
 parse_tree* parse_program(input_stream* is) {
-	Token token;
-	token.token_type = ROOT;
+	parse_tree* root = tree_create_leaf(create_not_terminal_token(ROOT, is->line, is->col));
+	advance_token(is);
 
-	parse_tree* root = tree_create_leaf(token);
-
-	parse_function(is, root);
-
+	while (current_parsed_token.token_type != END_OF_FILE) {
+		if (current_parsed_token.token_type == FUNC) {
+			parse_function(is, root);
+		}
+		else if (current_parsed_token.token_type == IF ||
+			current_parsed_token.token_type == WHILE ||
+			current_parsed_token.token_type == RETURN ||
+			current_parsed_token.token_type == IDENTIFIER) {
+			parse_statement(is, root);
+		}
+		else {
+			// Если токен не является ни началом функции, ни началом оператора,
+            // тогда это синтаксическая ошибка.
+            report_error(is, "Expected 'func' or a statement", current_parsed_token);
+            // Точки синхронизации для верхнего уровня: func, if, while, return, IDENTIFIER, END_OF_FILE
+            TokenType sync_points[] = {FUNC, IF, WHILE, RETURN, IDENTIFIER, END_OF_FILE};
+            sync_to(is, sync_points, sizeof(sync_points) / sizeof(sync_points[0]));
+            if (current_parsed_token.token_type == END_OF_FILE) {
+                break; // Выход, если достигнут конец файла во время синхронизации
+            }
+		}
+	}
 	return root;
 }
 
-void parse_function(input_stream* is, parse_tree* root) {
-	Token token = get_next_token(is);
+bool parse_function(input_stream* is, parse_tree* root) {
+    parse_tree* func_node = tree_create_leaf(current_parsed_token); // Создаем узел func раньше, чтобы добавить к нему ошибки
 
-	if (token.token_type == FUNC) {
-		parse_tree* func = tree_create_leaf(token);
-		tree_add(root, func);
+    if (current_parsed_token.token_type != FUNC) {
+        report_error(is, "Expected 'func'", current_parsed_token);
+        TokenType sync_points[] = {SEMICOLON, RIGHT_BRACE, FUNC, IF, WHILE, RETURN, IDENTIFIER, END_OF_FILE};
+        sync_to(is, sync_points, sizeof(sync_points) / sizeof(sync_points[0]));
+        return false;
+    }
 
-		token = get_next_token(is);
-		if (token.token_type == IDENTIFIER) {
-			parse_tree* identifier = tree_create_leaf(token);
-			tree_add(root, identifier);
+    tree_add(root, func_node);
+    advance_token(is); // Consume "func"
 
-			token = get_next_token(is);
-			if (token.token_type == LEFT_BRACKET) {
-				parse_tree* left_bracket = tree_create_leaf(token);
-				tree_add(root, left_bracket);
-				
-				parse_parametrs_opt(is, root);
-				
-				token = get_next_token(is);
-				if(token.token_type == RIGHT_BRACE) {
-					parse_tree* left_brace = tree_create_leaf(token);
-					tree_add(root, left_brace);
-					
-					token = create_token(STATEMENT, NULL, 0, token.line_count, token.in_line_pos);
-					parse_tree* statement = tree_create_leaf(token);
-					tree_add(root, statement);
-					parse_statement_list(is, statement);
-				}
-				
-			} else {
-				token = create_error_token();
-				parse_tree* error_tree = tree_create_leaf(token);
-				tree_add(root, error_tree);
+    if (current_parsed_token.token_type != IDENTIFIER) {
+        report_error(is, "Expected IDENTIFIER after 'func'", current_parsed_token);
+        TokenType sync_points[] = {LEFT_BRACKET, SEMICOLON, RIGHT_BRACE, FUNC, IF, WHILE, RETURN, IDENTIFIER, END_OF_FILE};
+        sync_to(is, sync_points, sizeof(sync_points) / sizeof(sync_points[0]));
+        return false;
+    }
+    parse_tree* identifier_node = tree_create_leaf(current_parsed_token);
+    tree_add(func_node, identifier_node);
+    advance_token(is); // Consume IDENTIFIER
 
-				printf("error: supposed to be left_bracket\n");
+    if (current_parsed_token.token_type != LEFT_BRACKET) {
+        report_error(is, "Expected '(' after function identifier", current_parsed_token);
+        TokenType sync_points[] = {RIGHT_BRACKET, LEFT_BRACE, SEMICOLON, RIGHT_BRACE, FUNC, IF, WHILE, RETURN, IDENTIFIER, END_OF_FILE};
+        sync_to(is, sync_points, sizeof(sync_points) / sizeof(sync_points[0]));
+        return false;
+    }
+    parse_tree* left_bracket_node = tree_create_leaf(current_parsed_token);
+    tree_add(func_node, left_bracket_node);
+    advance_token(is); // Consume "("
+
+    parse_parameters_opt(is, func_node);
+
+    if (current_parsed_token.token_type != RIGHT_BRACKET) {
+        report_error(is, "Expected ')' after parameters", current_parsed_token);
+        TokenType sync_points[] = {LEFT_BRACE, SEMICOLON, RIGHT_BRACE, FUNC, IF, WHILE, RETURN, IDENTIFIER, END_OF_FILE};
+        sync_to(is, sync_points, sizeof(sync_points) / sizeof(sync_points[0]));
+        return false;
+    }
+    parse_tree* right_bracket_node = tree_create_leaf(current_parsed_token);
+    tree_add(func_node, right_bracket_node);
+    advance_token(is); // Consume ")"
+
+    if (current_parsed_token.token_type != LEFT_BRACE) {
+        report_error(is, "Expected '{' after function parameters", current_parsed_token);
+        TokenType sync_points[] = {RIGHT_BRACE, FUNC, IF, WHILE, RETURN, IDENTIFIER, END_OF_FILE};
+        sync_to(is, sync_points, sizeof(sync_points) / sizeof(sync_points[0]));
+        return false;
+    }
+    parse_tree* left_brace_node = tree_create_leaf(current_parsed_token);
+    tree_add(func_node, left_brace_node);
+    advance_token(is);
+
+    parse_tree* statement_list_node = tree_create_leaf(create_not_terminal_token(STATEMENT, is->line, is->col));
+    tree_add(func_node, statement_list_node);
+    parse_statement_list(is, statement_list_node); // statement_list_node
+
+    if (current_parsed_token.token_type != RIGHT_BRACE) {
+        report_error(is, "Expected '}' after function body", current_parsed_token);
+        TokenType sync_points[] = {FUNC, IF, WHILE, RETURN, IDENTIFIER, END_OF_FILE}; // Синхронизация до следующего верхнеуровневого элемента
+        sync_to(is, sync_points, sizeof(sync_points) / sizeof(sync_points[0]));
+        return false;
+    }
+    parse_tree* right_brace_node = tree_create_leaf(current_parsed_token);
+    tree_add(func_node, right_brace_node);
+    advance_token(is);
+    return true;
+}
+
+void parse_parameters_opt(input_stream* is, parse_tree* parent) {
+	if (current_parsed_token.token_type == RIGHT_BRACKET) {
+		return; // Пустой список параметров, скобка будет потреблена в parse_function
+	}
+	else if (current_parsed_token.token_type == IDENTIFIER) {
+		parse_tree* parameter_node = tree_create_leaf(current_parsed_token);
+		tree_add(parent, parameter_node);
+		advance_token(is); // Потребляем IDENTIFIER
+
+		while (current_parsed_token.token_type == COMMA) {
+			parse_tree* comma_node = tree_create_leaf(current_parsed_token);
+			tree_add(parent, comma_node);
+			advance_token(is); // Потребляем COMMA
+
+			if (current_parsed_token.token_type == IDENTIFIER) {
+				parse_tree* next_param = tree_create_leaf(current_parsed_token);
+				tree_add(parent, next_param);
+				advance_token(is); // Потребляем следующий IDENTIFIER
+			}
+			else {
+				fprintf(stderr, "Error: Expected IDENTIFIER after comma\n");
+				exit(SYNTAX_ERROR);
 			}
 		}
-		else {
-			token = create_error_token();
-			parse_tree* error_tree = tree_create_leaf(token);
-			tree_add(root, error_tree);
-
-			printf("error: supposed to be identifier\n");
-		}
-	}
-	else {
-		token = create_error_token();
-		parse_tree* error_tree = tree_create_leaf(token);
-		tree_add(root, error_tree);
-
-		printf("error: supposed to be 'func'\n");
 	}
 }
 
-void parse_parametrs_opt(input_stream* is, parse_tree* parent) {
-	Token token = get_next_token(is);
-	
-	if(token.token_type == IDENTIFIER) {
-		parse_tree* parametr = tree_create_leaf(token);
-		tree_add(parent, parametr);
-		
-		while((token = get_next_token(is)).token_type == COMMA) {
-			parse_tree* comma = tree_create_leaf(token);
-			tree_add(parent, comma);
-			
-			token = get_next_token(is);
-			if(token.token_type == IDENTIFIER) {
-				parse_tree* parametr_ = tree_create_leaf(token);
-				tree_add(parent, parametr_);
-			}
-		}
-		
-		if(token.token_type == RIGHT_BRACKET) {
-			parse_tree* right_bracket = tree_create_leaf(token);
-			tree_add(parent, right_bracket);
-			return;
-		}
-	} else if(token.token_type == RIGHT_BRACKET) {
-		parse_tree* right_bracket = tree_create_leaf(token);
-		tree_add(parent, right_bracket);
-		return;
-	}
+void parse_statement(input_stream* is, parse_tree* root) {
+    // Создаем временный узел для оператора, если он распознан успешно
+    parse_tree* stmt_node = NULL;
+
+    if (current_parsed_token.token_type == IF) {
+        stmt_node = tree_create_leaf(current_parsed_token);
+        tree_add(root, stmt_node);
+        advance_token(is);
+
+        if (current_parsed_token.token_type != LEFT_BRACKET) {
+            report_error(is, "Expected '(' after 'if'", current_parsed_token);
+            TokenType sync_points[] = {LEFT_BRACE, SEMICOLON, RIGHT_BRACE, FUNC, IF, WHILE, RETURN, IDENTIFIER, END_OF_FILE};
+            sync_to(is, sync_points, sizeof(sync_points) / sizeof(sync_points[0]));
+            return; // Не можем продолжать парсинг if
+        }
+        parse_tree* left_bracket = tree_create_leaf(current_parsed_token);
+        tree_add(stmt_node, left_bracket);
+        advance_token(is);
+
+        parse_expression(is, stmt_node);
+
+        if (current_parsed_token.token_type != RIGHT_BRACKET) {
+            report_error(is, "Expected ')' after if condition", current_parsed_token);
+            TokenType sync_points[] = {LEFT_BRACE, SEMICOLON, RIGHT_BRACE, FUNC, IF, WHILE, RETURN, IDENTIFIER, END_OF_FILE};
+            sync_to(is, sync_points, sizeof(sync_points) / sizeof(sync_points[0]));
+            return;
+        }
+        parse_tree* right_bracket = tree_create_leaf(current_parsed_token);
+        tree_add(stmt_node, right_bracket);
+        advance_token(is);
+
+        if (current_parsed_token.token_type != LEFT_BRACE) {
+            report_error(is, "Expected '{' after if condition", current_parsed_token);
+            TokenType sync_points[] = {RIGHT_BRACE, ELSE, SEMICOLON, FUNC, IF, WHILE, RETURN, IDENTIFIER, END_OF_FILE};
+            sync_to(is, sync_points, sizeof(sync_points) / sizeof(sync_points[0]));
+            return;
+        }
+        parse_tree* left_brace = tree_create_leaf(current_parsed_token);
+        tree_add(stmt_node, left_brace);
+        advance_token(is);
+
+        parse_tree* statement_list_node = tree_create_leaf(create_not_terminal_token(STATEMENT, is->line, is->col));
+        tree_add(stmt_node, statement_list_node);
+        parse_statement_list(is, statement_list_node);
+
+        if (current_parsed_token.token_type != RIGHT_BRACE) {
+            report_error(is, "Expected '}' after if block", current_parsed_token);
+            TokenType sync_points[] = {ELSE, SEMICOLON, FUNC, IF, WHILE, RETURN, IDENTIFIER, END_OF_FILE};
+            sync_to(is, sync_points, sizeof(sync_points) / sizeof(sync_points[0]));
+            return;
+        }
+        parse_tree* right_brace = tree_create_leaf(current_parsed_token);
+        tree_add(stmt_node, right_brace);
+        advance_token(is);
+
+        parse_else_stmt_opt(is, stmt_node); // parse_else_stmt_opt добавит свои узлы к stmt_node
+
+    } // ... (аналогично для WHILE, RETURN, ASSIGNMENT_OR_CALL_STMT)
+    else if (current_parsed_token.token_type == WHILE) {
+        stmt_node = tree_create_leaf(current_parsed_token);
+        tree_add(root, stmt_node);
+        advance_token(is);
+
+        if (current_parsed_token.token_type != LEFT_BRACKET) {
+            report_error(is, "Expected '(' after 'while'", current_parsed_token);
+            TokenType sync_points[] = {LEFT_BRACE, SEMICOLON, RIGHT_BRACE, FUNC, IF, WHILE, RETURN, IDENTIFIER, END_OF_FILE};
+            sync_to(is, sync_points, sizeof(sync_points) / sizeof(sync_points[0]));
+            return;
+        }
+        parse_tree* left_bracket = tree_create_leaf(current_parsed_token);
+        tree_add(stmt_node, left_bracket);
+        advance_token(is);
+
+        parse_expression(is, stmt_node);
+
+        if (current_parsed_token.token_type != RIGHT_BRACKET) {
+            report_error(is, "Expected ')' after while condition", current_parsed_token);
+            TokenType sync_points[] = {LEFT_BRACE, SEMICOLON, RIGHT_BRACE, FUNC, IF, WHILE, RETURN, IDENTIFIER, END_OF_FILE};
+            sync_to(is, sync_points, sizeof(sync_points) / sizeof(sync_points[0]));
+            return;
+        }
+        parse_tree* right_bracket = tree_create_leaf(current_parsed_token);
+        tree_add(stmt_node, right_bracket);
+        advance_token(is);
+
+        if (current_parsed_token.token_type != LEFT_BRACE) {
+            report_error(is, "Expected '{' after while condition", current_parsed_token);
+            TokenType sync_points[] = {RIGHT_BRACE, SEMICOLON, FUNC, IF, WHILE, RETURN, IDENTIFIER, END_OF_FILE};
+            sync_to(is, sync_points, sizeof(sync_points) / sizeof(sync_points[0]));
+            return;
+        }
+        parse_tree* left_brace = tree_create_leaf(current_parsed_token);
+        tree_add(stmt_node, left_brace);
+        advance_token(is);
+
+        parse_tree* statement_list_node = tree_create_leaf(create_not_terminal_token(STATEMENT, is->line, is->col));
+        tree_add(stmt_node, statement_list_node);
+        parse_statement_list(is, statement_list_node);
+
+        if (current_parsed_token.token_type != RIGHT_BRACE) {
+            report_error(is, "Expected '}' after while block", current_parsed_token);
+            TokenType sync_points[] = {SEMICOLON, FUNC, IF, WHILE, RETURN, IDENTIFIER, END_OF_FILE};
+            sync_to(is, sync_points, sizeof(sync_points) / sizeof(sync_points[0]));
+            return;
+        }
+        parse_tree* right_brace = tree_create_leaf(current_parsed_token);
+        tree_add(stmt_node, right_brace);
+        advance_token(is);
+
+    }
+    else if (current_parsed_token.token_type == RETURN) {
+        stmt_node = tree_create_leaf(current_parsed_token);
+        tree_add(root, stmt_node);
+        advance_token(is);
+
+        if (current_parsed_token.token_type == SEMICOLON) {
+            parse_tree* semicolon = tree_create_leaf(current_parsed_token);
+            tree_add(stmt_node, semicolon);
+            advance_token(is);
+        } else {
+            parse_expression(is, stmt_node);
+            if (current_parsed_token.token_type != SEMICOLON) {
+                report_error(is, "Expected ';' after return statement", current_parsed_token);
+                TokenType sync_points[] = {FUNC, IF, WHILE, RETURN, IDENTIFIER, END_OF_FILE};
+                sync_to(is, sync_points, sizeof(sync_points) / sizeof(sync_points[0]));
+                return;
+            }
+            parse_tree* semicolon = tree_create_leaf(current_parsed_token);
+            tree_add(stmt_node, semicolon);
+            advance_token(is);
+        }
+    }
+    else if (current_parsed_token.token_type == IDENTIFIER) {
+        parse_assignment_or_call_stmt(is, root); // Эта функция сама обрабатывает ошибки
+    }
+    else {
+        report_error(is, "Unexpected token for statement", current_parsed_token);
+        TokenType sync_points[] = {SEMICOLON, RIGHT_BRACE, FUNC, IF, WHILE, RETURN, IDENTIFIER, END_OF_FILE};
+        sync_to(is, sync_points, sizeof(sync_points) / sizeof(sync_points[0]));
+        return;
+    }
 }
 
 void parse_statement_list(input_stream* is, parse_tree* root) {
-	Token token = get_next_token(is);
-	
-	if(token.token_type = IF) {
-		parse_tree* if_ = tree_create_leaf(token);
-		tree_add(root, if_);
-		
-		token = get_next_token(is);
-		if(token.token_type == LEFT_BRACKET) {
-			parse_tree* left_bracket = tree_create_leaf(token);
-			tree_add(root, left_bracket);
-			
-			token = get_next_token(is);
+	while (current_parsed_token.token_type != RIGHT_BRACE &&
+		current_parsed_token.token_type != END_OF_FILE) {
+		parse_statement(is, root);
+	}
+}
+
+void parse_assignment_or_call_stmt(input_stream* is, parse_tree* root) {
+    if (current_parsed_token.token_type != IDENTIFIER) {
+        report_error(is, "Expected IDENTIFIER for assignment or call", current_parsed_token);
+        TokenType sync_points[] = {SEMICOLON, RIGHT_BRACE, FUNC, IF, WHILE, RETURN, IDENTIFIER, END_OF_FILE};
+        sync_to(is, sync_points, sizeof(sync_points) / sizeof(sync_points[0]));
+        return;
+    }
+    
+    parse_tree* identifier = tree_create_leaf(current_parsed_token);
+    tree_add(root, identifier);
+    advance_token(is);
+
+    parse_assignment_or_call_suffix(is, root);
+
+    if (current_parsed_token.token_type != SEMICOLON) {
+        report_error(is, "Expected ';' after assignment or call", current_parsed_token);
+        TokenType sync_points[] = {RIGHT_BRACE, FUNC, IF, WHILE, RETURN, IDENTIFIER, END_OF_FILE};
+        sync_to(is, sync_points, sizeof(sync_points) / sizeof(sync_points[0]));
+        return;
+    }
+    
+    parse_tree* semicolon = tree_create_leaf(current_parsed_token);
+    tree_add(root, semicolon);
+    advance_token(is);
+}
+
+void parse_assignment_or_call_suffix(input_stream* is, parse_tree* root) {
+	if (current_parsed_token.token_type == EQUALS) {
+		parse_tree* equals = tree_create_leaf(current_parsed_token);
+		tree_add(root, equals);
+		advance_token(is);
+
+		parse_expression(is, root);
+	}
+	else if (current_parsed_token.token_type == LEFT_BRACKET) {
+		parse_tree* left_bracket = tree_create_leaf(current_parsed_token);
+		tree_add(root, left_bracket);
+		advance_token(is);
+
+		parse_arguments_opt(is, root);
+
+		if (current_parsed_token.token_type == RIGHT_BRACKET) {
+			parse_tree* right_bracket = tree_create_leaf(current_parsed_token);
+			tree_add(root, right_bracket);
+			advance_token(is);
+		}
+		else {
+			fprintf(stderr, "Error %u:%u: Expected ')' after function arguments.\n", current_parsed_token.line_count, current_parsed_token.in_line_pos);
+			exit(SYNTAX_ERROR);
 		}
 	}
+	else {
+		fprintf(stderr, "Error %u:%u: Expected '=' or '(' for assignment or call suffix.\n", current_parsed_token.line_count, current_parsed_token.in_line_pos);
+		exit(SYNTAX_ERROR);
+	}
+}
+
+void parse_else_stmt_opt(input_stream* is, parse_tree* root) {
+	if (current_parsed_token.token_type == ELSE) { // ИСПРАВЛЕНО: Проверяем current_parsed_token напрямую
+		parse_tree* else_ = tree_create_leaf(current_parsed_token);
+		tree_add(root, else_); // Добавляем 'else' к if_node
+		advance_token(is); // Потребляем "else"
+
+		if (current_parsed_token.token_type == LEFT_BRACE) {
+			parse_tree* left_brace = tree_create_leaf(current_parsed_token);
+			tree_add(else_, left_brace); // Добавляем '{' к else_node
+			advance_token(is); // ИСПРАВЛЕНО: Потребляем "{"
+
+			parse_tree* statement_list = tree_create_leaf(create_not_terminal_token(STATEMENT, is->line, is->col));
+			tree_add(else_, statement_list); // Добавляем statement_list к else_node
+			parse_statement_list(is, statement_list); // parse_statement_list оставляет current_parsed_token на '}'
+
+			if (current_parsed_token.token_type == RIGHT_BRACE) {
+				parse_tree* right_brace = tree_create_leaf(current_parsed_token);
+				tree_add(else_, right_brace); // Добавляем '}' к else_node
+				advance_token(is); // Потребляем "}"
+			}
+			else {
+				fprintf(stderr, "Error %u:%u: Expected '}' after else block.\n", current_parsed_token.line_count, current_parsed_token.in_line_pos);
+				exit(SYNTAX_ERROR);
+			}
+		}
+		else {
+			fprintf(stderr, "Error %u:%u: Expected '{' after 'else'.\n", current_parsed_token.line_count, current_parsed_token.in_line_pos);
+			exit(SYNTAX_ERROR);
+		}
+	}
+	// Если не ELSE, это эпсилон-случай, просто возвращаемся.
+}
+
+void parse_expression(input_stream* is, parse_tree* root) {
+	if (!is_valid_expression_start(current_parsed_token.token_type)) {
+        report_error(is, "Invalid expression start", current_parsed_token);
+        // Пытаемся синхронизироваться до конца выражения или начала следующего оператора
+        TokenType sync_points[] = {RIGHT_BRACKET, SEMICOLON, COMMA, LOGICAL_OR, LOGICAL_AND, 
+								   EQUAL_EQUAL, NOT_EQUAL, LESS, GREATER, LESS_EQUAL, GREATER_EQUAL, 
+								   ADD, SUBTRACT, MULTIPLY, DIVIDE, END_OF_FILE};
+        sync_to(is, sync_points, sizeof(sync_points) / sizeof(sync_points[0]));
+        return;
+    }
+    parse_logical_or_terminal(is, root);
+}
+
+void parse_logical_or_terminal(input_stream* is, parse_tree* root) {
+	parse_logical_and_terminal(is, root);
+	parse_logical_or_tail(is, root);
+}
+
+void parse_logical_or_tail(input_stream* is, parse_tree* root) {
+	if (current_parsed_token.token_type == LOGICAL_OR) {
+		parse_tree* logical_or = tree_create_leaf(current_parsed_token);
+		tree_add(root, logical_or);
+		advance_token(is); // Потребляем "||"
+
+		parse_logical_and_terminal(is, root);
+		parse_logical_or_tail(is, root); // Рекурсивный вызов
+	}
+	// Если не LOGICAL_OR, это эпсилон-случай, просто возвращаемся.
+}
+
+void parse_logical_and_terminal(input_stream* is, parse_tree* root) {
+	parse_equality_terminal(is, root);
+	parse_logical_and_tail(is, root);
+}
+
+void parse_logical_and_tail(input_stream* is, parse_tree* root) {
+	if (current_parsed_token.token_type == LOGICAL_AND) {
+		parse_tree* logical_and = tree_create_leaf(current_parsed_token);
+		tree_add(root, logical_and);
+		advance_token(is);
+
+		parse_equality_terminal(is, root);
+		parse_logical_and_tail(is, root);
+	}
+}
+
+void parse_equality_terminal(input_stream* is, parse_tree* root) {
+	parse_comparison_terminal(is, root);
+	parse_equality_tail(is, root);
+}
+
+void parse_equality_tail(input_stream* is, parse_tree* root) {
+	if(current_parsed_token.token_type == EQUAL_EQUAL) {
+		parse_tree* equal_equal = tree_create_leaf(current_parsed_token);
+		tree_add(root, equal_equal);
+		advance_token(is);
+
+		parse_comparison_terminal(is, root);
+		parse_equality_tail(is, root);
+	} else if (current_parsed_token.token_type == NOT_EQUAL) {
+		parse_tree* not_equal = tree_create_leaf(current_parsed_token);
+		tree_add(root, not_equal);
+		advance_token(is);
+
+		parse_comparison_terminal(is, root);
+		parse_equality_tail(is, root);
+	}
+	return;
+}
+
+void parse_comparison_terminal(input_stream* is, parse_tree* root) {
+	parse_term_terminal(is, root);
+	parse_comparison_tail(is, root);
+}
+
+void parse_comparison_tail(input_stream* is, parse_tree* root) {
+	if (current_parsed_token.token_type == LESS) {
+		parse_tree* less = tree_create_leaf(current_parsed_token);
+		tree_add(root, less);
+		advance_token(is);
+
+		parse_term_terminal(is, root);
+		parse_comparison_tail(is, root);
+
+		return;
+	}
+	else if (current_parsed_token.token_type == GREATER) {
+		parse_tree* greater = tree_create_leaf(current_parsed_token);
+		tree_add(root, greater);
+		advance_token(is);
+
+		parse_term_terminal(is, root);
+		parse_comparison_tail(is, root);
+
+		return;
+	}
+	else if (current_parsed_token.token_type == LESS_EQUAL) {
+		parse_tree* less_equal = tree_create_leaf(current_parsed_token);
+		tree_add(root, less_equal);
+		advance_token(is);
+
+		parse_term_terminal(is, root);
+		parse_comparison_tail(is, root);
+
+		return;
+	}
+	else if (current_parsed_token.token_type == GREATER_EQUAL) {
+		parse_tree* greater_equal = tree_create_leaf(current_parsed_token);
+		tree_add(root, greater_equal);
+		advance_token(is);
+
+		parse_term_terminal(is, root);
+		parse_comparison_tail(is, root);
+
+		return;
+	}
+	return;
+}
+
+void parse_term_terminal(input_stream* is, parse_tree* root) {
+	parse_factor_terminal(is, root);
+	parse_term_tail(is, root);
+}
+
+void parse_term_tail(input_stream* is, parse_tree* root) {
+	if (current_parsed_token.token_type == ADD) {
+		parse_tree* add = tree_create_leaf(current_parsed_token);
+		tree_add(root, add);
+		advance_token(is);
+
+		parse_factor_terminal(is, root);
+		parse_term_tail(is, root);
+
+		return;
+	} else if (current_parsed_token.token_type == SUBTRACT) {
+		parse_tree* subtract = tree_create_leaf(current_parsed_token);
+		tree_add(root, subtract);
+		advance_token(is);
+
+		parse_factor_terminal(is, root);
+		parse_term_tail(is, root);
+
+		return;
+	}
+	return;
+}
+
+void parse_factor_terminal(input_stream* is, parse_tree* root) {
+	parse_unary_terminal(is, root);
+	parse_factor_tail(is, root);
+}
+
+void parse_factor_tail(input_stream* is, parse_tree* root) {
+	// TODO: таже самая ошибка, при продвинутом current_parsed_token,
+	// пикается дальше следующий токен
+	
+	if (current_parsed_token.token_type == MULTIPLY) {
+		parse_tree* multiply = tree_create_leaf(current_parsed_token);
+		tree_add(root, multiply);
+		advance_token(is);
+
+		parse_unary_terminal(is, root);
+		parse_factor_tail(is, root);
+
+		return;
+	}
+	else if (current_parsed_token.token_type == DIVIDE) {
+		parse_tree* divide = tree_create_leaf(current_parsed_token);
+		tree_add(root, divide);
+		advance_token(is);
+
+		parse_unary_terminal(is, root);
+		parse_factor_tail(is, root);
+
+		return;
+	}
+	return;
+}
+
+void parse_unary_terminal(input_stream* is, parse_tree* root) {
+	// TODO: ошибка синтаксического анализа
+	// до вызова parse_unary_terminal() токен уже был продвинут,
+	// а тут еще пикается следующий, исправлено на проверку сразу current_parse_token
+
+	if (current_parsed_token.token_type == NOT) {
+		parse_tree* not = tree_create_leaf(current_parsed_token);
+		tree_add(root, not);
+		advance_token(is);
+
+		parse_unary_terminal(is, root);
+	} else if (current_parsed_token.token_type == SUBTRACT) {
+		parse_tree * subtract = tree_create_leaf(current_parsed_token);
+		tree_add(root, subtract);
+		advance_token(is);
+
+		parse_unary_terminal(is, root);
+	} else {
+		parse_primary_terminal(is, root);
+	}
+}
+
+void parse_primary_terminal(input_stream* is, parse_tree* root) {
+    if (current_parsed_token.token_type == DIGIT) {
+        parse_tree* number = tree_create_leaf(current_parsed_token);
+        tree_add(root, number);
+        advance_token(is);
+    }
+    else if (current_parsed_token.token_type == IDENTIFIER) {
+        Token next_token = peek_next_token(is);
+        if (next_token.token_type == LEFT_BRACKET) {
+            parse_call_primary(is, root);
+        }
+        else {
+            parse_tree* identifier = tree_create_leaf(current_parsed_token);
+            tree_add(root, identifier);
+            advance_token(is);
+        }
+    }
+    else if (current_parsed_token.token_type == LEFT_BRACKET) {
+        parse_tree* left_bracket = tree_create_leaf(current_parsed_token);
+        tree_add(root, left_bracket);
+        advance_token(is);
+
+        parse_expression(is, root);
+
+        if (current_parsed_token.token_type != RIGHT_BRACKET) {
+            report_error(is, "Expected ')' after expression", current_parsed_token);
+            // После ошибки в выражении внутри скобок, синхронизируемся до ближайшего ')' или ';'
+            TokenType sync_points[] = {RIGHT_BRACKET, SEMICOLON, END_OF_FILE};
+            sync_to(is, sync_points, sizeof(sync_points) / sizeof(sync_points[0]));
+            // Если мы нашли ')' после синхронизации, потребляем его.
+            if (current_parsed_token.token_type == RIGHT_BRACKET) {
+                parse_tree* right_bracket = tree_create_leaf(current_parsed_token);
+                tree_add(root, right_bracket);
+                advance_token(is);
+            }
+            return; // Не можем продолжать парсить primary_terminal после ошибки
+        }
+        parse_tree* right_bracket = tree_create_leaf(current_parsed_token);
+        tree_add(root, right_bracket);
+        advance_token(is);
+    }
+    else {
+        report_error(is, "Expected NUMBER, IDENTIFIER or '('", current_parsed_token);
+        // Синхронизация до токена, который может завершать текущий контекст выражения
+        TokenType sync_points[] = {RIGHT_BRACKET, SEMICOLON, COMMA, LOGICAL_OR, LOGICAL_AND, 
+								   EQUAL_EQUAL, NOT_EQUAL, LESS, GREATER, LESS_EQUAL, GREATER_EQUAL, 
+								   ADD, SUBTRACT, MULTIPLY, DIVIDE, END_OF_FILE};
+        sync_to(is, sync_points, sizeof(sync_points) / sizeof(sync_points[0]));
+    }
+}
+
+void parse_call_primary(input_stream* is, parse_tree* root) {
+	parse_tree* identifier = tree_create_leaf(current_parsed_token);
+	tree_add(root, identifier);
+	advance_token(is);
+
+	if (current_parsed_token.token_type == LEFT_BRACKET) {
+		parse_tree* left_bracket = tree_create_leaf(current_parsed_token);
+		tree_add(root, left_bracket);
+		advance_token(is);
+
+		parse_arguments_opt(is, root);
+
+		if (current_parsed_token.token_type == RIGHT_BRACKET) {
+			parse_tree* right_bracket = tree_create_leaf(current_parsed_token);
+			tree_add(root, right_bracket);
+			advance_token(is);
+		}
+		else {
+			fprintf(stderr, "Error: Expected ')' after arguments\n");
+			exit(SYNTAX_ERROR);
+		}
+	}
+	else {
+		fprintf(stderr, "Error: Expected '(' after identifier\n");
+		exit(SYNTAX_ERROR);
+	}
+}
+
+void parse_arguments_opt(input_stream* is, parse_tree* root) {
+	if (current_parsed_token.token_type == RIGHT_BRACKET) {
+		return; // Нет аргументов
+	}
+
+	parse_expression(is, root);
+
+	while (current_parsed_token.token_type == COMMA) {
+		parse_tree* comma = tree_create_leaf(current_parsed_token);
+		tree_add(root, comma);
+		advance_token(is);
+
+		parse_expression(is, root);
+	}
+}
+
+void parse_argument_list(input_stream* is, parse_tree* root) {
+	// current_parsed_token уже должен быть токеном после первого expr в parse_arguments_opt,
+	// то есть ',' или ')'
+	while (current_parsed_token.token_type == COMMA) {
+		parse_tree* comma = tree_create_leaf(current_parsed_token);
+		tree_add(root, comma);
+		advance_token(is); // Consume COMMA
+
+		parse_expression(is, root); // Parse next argument
+		// After parse_expression, current_parsed_token is the first token *after* the expression.
+	}
+	// Loop ends when current_parsed_token is not COMMA (it should be RIGHT_BRACKET)
 }
 
 int main(int argc, char** argv) {
@@ -1011,25 +1773,22 @@ int main(int argc, char** argv) {
 
 		// Interpretation 
 		if (strcmp("c", flag) == 0) {
-			printf("filename: %s\n", argv[1]);
+			printf("Compilation of file: %s\n", argv[1]);
 
-			printf("Compilation...\n\n");
-
-			// setup for lexing and parsing
-			input_stream* is;
-
-			is = input_stream_init(argv[1]);
-
-			parse_tree* program = parse_program(is);
-			tree_traverse(program, 0);
-		
-#if 1
-			Token token = get_next_token(is);
-			while (token.token_type != END_OF_FILE) {
-				printf("lexeme: %s; type: %d\n", token.value.token_value, token.token_type);
-				token = get_next_token(is);
+			input_stream* is = input_stream_init(argv[1]);
+			if (!is->file) { // Проверяем, открылся ли файл
+				fprintf(stderr, "Error: Could not open file '%s'\n", argv[1]);
+				free(flag);
+				return FILE_OPEN_ERROR;
 			}
-#endif
+	
+			parse_tree* program = parse_program(is);
+			if(has_errors)
+				fprintf(stderr, "\nParsing finished with errors.\n");
+			else {
+				printf("\nParsing successful!\n");
+				tree_traverse(program, 0);
+			}
 		}
 		// Compilation
 		else if (strcmp("c", flag) == 0) {}
@@ -1055,11 +1814,8 @@ int main(int argc, char** argv) {
 
 	is = input_stream_init(f);
 
-	Token token = get_next_token(is);
-	while (token.token_type != END_OF_FILE) {
-		printf("lexeme: %s; type: %d\n", token.value.token_value, token.token_type);
-		token = get_next_token(is);
-	}
+	parse_tree* program = parse_program(is);
+	tree_traverse(program, 0);
 #endif
 	return 0;
 }
